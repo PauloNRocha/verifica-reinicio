@@ -209,5 +209,3 @@ Se quiser melhorar detecções, regex, adicionar novos modos, ou integrar com Pr
 ## ⭐ Gostou?
 
 Deixe uma estrela no repositório para ajudar outras pessoas a encontrarem a ferramenta!
-
-```
