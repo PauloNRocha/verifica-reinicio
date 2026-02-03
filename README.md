@@ -1,6 +1,8 @@
 # 🔍 verifica-reinicio.sh  
 Ferramenta avançada para diagnosticar o motivo do último reinício do sistema Linux.
 
+**Versão:** 1.2.0 (2026-02-03)
+
 Criado para administradores que precisam entender **o porquê** de um servidor reiniciar — seja por:
 - Kernel Panic  
 - OOM (Out of Memory)  
@@ -19,6 +21,8 @@ Esse script automatiza todo o processo de análise que normalmente exigiria dive
 ## ✨ Recursos principais
 
 ✔️ Analisa **journalctl do boot anterior**  
+✔️ Exibe histórico de boots (`journalctl --list-boots`)  
+✔️ Mostra linha do tempo com `who -b` e `uptime`  
 ✔️ Analisa **logs auxiliares** em `/var/log/*`  
 ✔️ Suporta leitura de logs compactados (`.gz`)  
 ✔️ Detecta quando o **journald é volátil** (logs perdidos no reboot)  
@@ -26,6 +30,7 @@ Esse script automatiza todo o processo de análise que normalmente exigiria dive
 ✔️ Diferencia “causa real” de “indícios antigos”  
 ✔️ Modo rápido (FAST) e modo profundo (FULL)  
 ✔️ Pode salvar relatório completo com `--save`  
+✔️ IPMI SEL opcional no modo FULL (quando disponível)  
 ✔️ Funciona em: Debian, Ubuntu, RHEL, Rocky, AlmaLinux e até servidores **cPanel/WHM**
 
 ---
@@ -79,6 +84,12 @@ sudo ./verifica-reinicio.sh --save
 sudo ./verifica-reinicio.sh --full --save
 ```
 
+### Ver versão do script
+
+```bash
+sudo ./verifica-reinicio.sh --version
+```
+
 ---
 
 ## 🧠 Estrutura da análise
@@ -90,7 +101,7 @@ O script usa uma hierarquia para determinar a causa com segurança:
 Se existir → É a fonte mais confiável
 Se indicar Kernel Panic, OOM, Watchdog… → causa confirmada
 
-### 2️⃣ **Logs persistentes em `/var/log`**
+### 2️⃣ **Logs persistentes em `/var/log` (apenas no modo FULL)**
 
 Usado quando:
 
@@ -106,6 +117,10 @@ Se não houver logs suficientes → o script avisa com clareza
 E sugere habilitar journald persistente se necessário.
 
 ---
+
+## 🔌 IPMI (opcional)
+
+Se o `ipmitool` estiver disponível, o modo FULL coleta o SEL e tenta correlacionar eventos próximos ao shutdown detectado no journal. Isso ajuda a identificar perda/instabilidade elétrica quando o journal indica apenas shutdown limpo.
 
 ## 🔧 Exemplos de resultados
 

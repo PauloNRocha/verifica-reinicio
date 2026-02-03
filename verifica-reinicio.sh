@@ -40,6 +40,9 @@ MODE="FAST"
 SAVE=0
 SAVE_FILE=""
 
+SCRIPT_VERSION="1.2.0"
+SCRIPT_DATE="2026-02-03"
+
 FAST_LIMIT=1500
 FULL_LIMIT=8000
 
@@ -67,6 +70,7 @@ Opções disponíveis:
 
   --full        Executa análise profunda (usa mais fontes de log, inclusive .gz)
   --save        Salva relatório em /tmp/analise-reinicio-AAAA-MM-DD_HH-MM-SS.log
+  --version     Mostra a versão do script
   --help        Mostra esta ajuda
 
 Modo padrão (sem flags):
@@ -81,6 +85,11 @@ EOF
 exit "$status"
 }
 
+show_version() {
+    echo "verifica-reinicio.sh versão $SCRIPT_VERSION ($SCRIPT_DATE)"
+    exit 0
+}
+
 # =======================[ PARSE ARGS ]====================================
 
 parse_args() {
@@ -91,6 +100,9 @@ parse_args() {
                 ;;
             --save)
                 SAVE=1
+                ;;
+            --version)
+                show_version
                 ;;
             --help)
                 init_colors
