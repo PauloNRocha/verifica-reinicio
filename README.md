@@ -72,7 +72,8 @@ sudo ./verifica-reinicio.sh --full
 
 ### Salvar relatório em arquivo
 
-Gera `/tmp/analise-reinicio-AAAA-MM-DD_HH-MM-SS.log`:
+Gera `/tmp/analise-reinicio-HOST-AAAA-MM-DD_HH-MM-SS.log`:
+`HOST` é o hostname detectado.
 
 ```bash
 sudo ./verifica-reinicio.sh --save

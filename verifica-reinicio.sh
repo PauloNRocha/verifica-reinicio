@@ -58,6 +58,8 @@ IPMI_AVAILABLE=0
 IPMI_SEL_TIME=""
 IPMI_SEL_LIST=""
 IPMI_SEL_NEAR=""
+HOSTNAME_RAW="desconhecido"
+HOSTNAME_SAFE="desconhecido"
 
 # =======================[ AJUDA ]=========================================
 
@@ -69,7 +71,7 @@ ${C_BOLD}Uso:${C_RESET} sudo $0 [opções]
 Opções disponíveis:
 
   --full        Executa análise profunda (usa mais fontes de log, inclusive .gz)
-  --save        Salva relatório em /tmp/analise-reinicio-AAAA-MM-DD_HH-MM-SS.log
+  --save        Salva relatório em /tmp/analise-reinicio-HOST-AAAA-MM-DD_HH-MM-SS.log
   --version     Mostra a versão do script
   --help        Mostra esta ajuda
 
@@ -136,6 +138,7 @@ mostra_info_sistema() {
     else
         echo "  (não foi possível detectar via /etc/os-release)"
     fi
+    echo "  Hostname: ${HOSTNAME_RAW}"
     echo
 
     echo -e "${C_BOLD}${C_CYAN}Boot atual:${C_RESET}"
@@ -546,11 +549,33 @@ habilita_save() {
     if [[ "$SAVE" -eq 1 ]]; then
         local ts
         ts="$(date +%Y-%m-%d_%H-%M-%S)"
-        SAVE_FILE="/tmp/analise-reinicio-$ts.log"
+        SAVE_FILE="/tmp/analise-reinicio-${HOSTNAME_SAFE}-${ts}.log"
         # Captura stdout e stderr
         exec > >(tee "$SAVE_FILE") 2>&1
         echo -e "${C_GREEN}Relatório será salvo em:${C_RESET} $SAVE_FILE"
         echo
+    fi
+}
+
+# =======================[ HOSTNAME ]=====================================
+
+detecta_hostname() {
+    local hn=""
+    if command -v hostname >/dev/null 2>&1; then
+        hn="$(hostname 2>/dev/null || true)"
+    elif [[ -r /etc/hostname ]]; then
+        hn="$(head -n 1 /etc/hostname 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$hn" ]]; then
+        HOSTNAME_RAW="$hn"
+    else
+        HOSTNAME_RAW="desconhecido"
+    fi
+
+    HOSTNAME_SAFE="$(echo "$HOSTNAME_RAW" | tr -c 'A-Za-z0-9._-' '_' | sed 's/^_*//;s/_*$//')"
+    if [[ -z "$HOSTNAME_SAFE" ]]; then
+        HOSTNAME_SAFE="host"
     fi
 }
 
@@ -560,6 +585,7 @@ main() {
     parse_args "$@"
     init_colors
     requer_root
+    detecta_hostname
     habilita_save
 
     detecta_journal_volatile
