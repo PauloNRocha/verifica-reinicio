@@ -40,7 +40,7 @@ MODE="FAST"
 SAVE=0
 SAVE_FILE=""
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 SCRIPT_DATE="2026-02-03"
 
 FAST_LIMIT=1500
@@ -71,7 +71,7 @@ ${C_BOLD}Uso:${C_RESET} sudo $0 [opções]
 Opções disponíveis:
 
   --full        Executa análise profunda (usa mais fontes de log, inclusive .gz)
-  --save        Salva relatório em /tmp/analise-reinicio-HOST-AAAA-MM-DD_HH-MM-SS.log
+  --save        Salva relatório em /tmp/analise-reinicio-HOST-AAAA-MM-DD_HH-MM-SS-XXXXXX.log
   --version     Mostra a versão do script
   --help        Mostra esta ajuda
 
@@ -324,7 +324,7 @@ analisa_reinicio() {
     local rx_powerkey='systemd-logind\[.*\]: (Power key pressed short|Power key pressed|Powering off|System is powering down)'
     local rx_powerloss='power failure|ac lost|power loss|power supply|psu|mains power|line power|power outage|brownout|\<ups\>|upsd|apcupsd'
     local rx_update='unattended-upgrade|dpkg:.*linux-image|apt-get.*(dist-upgrade|full-upgrade)'
-    local rx_reboot='reboot: System reboot|Restarting system'
+    local rx_reboot='reboot: System reboot|Restarting system|machine_restart'
 
     # Primeiro: tentar achar causa no journal do boot anterior (se existir)
     if [[ -n "$journal" ]]; then
@@ -443,7 +443,7 @@ filtra_ipmi_proximo() {
     [[ -z "$shutdown_ts" || -z "$list" ]] && return 0
 
     local shutdown_epoch
-    shutdown_epoch="$(date -d "$shutdown_ts" +%s 2>/dev/null || true)"
+    shutdown_epoch="$(LC_ALL=C date -d "$shutdown_ts" +%s 2>/dev/null || true)"
     [[ -z "$shutdown_epoch" ]] && return 0
 
     local window=900
@@ -452,10 +452,10 @@ filtra_ipmi_proximo() {
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         local datetime
-        datetime="$(awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $1" "$2}' <<< "$line")"
+        datetime="$(awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3); print $2" "$3}' <<< "$line")"
         [[ -z "$datetime" ]] && continue
         local epoch
-        epoch="$(date -d "$datetime" +%s 2>/dev/null || true)"
+        epoch="$(LC_ALL=C date -d "$datetime" +%s 2>/dev/null || true)"
         [[ -z "$epoch" ]] && continue
         local diff=$((epoch - shutdown_epoch))
         diff=${diff#-}
@@ -478,8 +478,13 @@ coleta_ipmi() {
     modprobe ipmi_si >/dev/null 2>&1 || true
     modprobe ipmi_devintf >/dev/null 2>&1 || true
 
-    IPMI_SEL_TIME="$(ipmitool sel time get 2>/dev/null || true)"
-    IPMI_SEL_LIST="$(ipmitool sel list 2>/dev/null | tail -n 50 || true)"
+    if command -v timeout >/dev/null 2>&1; then
+        IPMI_SEL_TIME="$(timeout 8s ipmitool sel time get 2>/dev/null || true)"
+        IPMI_SEL_LIST="$(timeout 12s ipmitool sel list 2>/dev/null | tail -n 50 || true)"
+    else
+        IPMI_SEL_TIME="$(ipmitool sel time get 2>/dev/null || true)"
+        IPMI_SEL_LIST="$(ipmitool sel list 2>/dev/null | tail -n 50 || true)"
+    fi
     IPMI_SEL_NEAR="$(filtra_ipmi_proximo "$SHUTDOWN_TS" "$IPMI_SEL_LIST")"
 }
 
@@ -549,7 +554,13 @@ habilita_save() {
     if [[ "$SAVE" -eq 1 ]]; then
         local ts
         ts="$(date +%Y-%m-%d_%H-%M-%S)"
-        SAVE_FILE="/tmp/analise-reinicio-${HOSTNAME_SAFE}-${ts}.log"
+        if command -v mktemp >/dev/null 2>&1; then
+            SAVE_FILE="$(mktemp "/tmp/analise-reinicio-${HOSTNAME_SAFE}-${ts}-XXXXXX.log")"
+        else
+            SAVE_FILE="/tmp/analise-reinicio-${HOSTNAME_SAFE}-${ts}-XXXXXX.log"
+            : > "$SAVE_FILE"
+        fi
+        chmod 600 "$SAVE_FILE" 2>/dev/null || true
         # Captura stdout e stderr
         exec > >(tee "$SAVE_FILE") 2>&1
         echo -e "${C_GREEN}Relatório será salvo em:${C_RESET} $SAVE_FILE"

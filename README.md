@@ -1,7 +1,7 @@
 # 🔍 verifica-reinicio.sh  
 Ferramenta avançada para diagnosticar o motivo do último reinício do sistema Linux.
 
-**Versão:** 1.2.0 (2026-02-03)
+**Versão:** 1.2.1 (2026-02-03)
 
 Criado para administradores que precisam entender **o porquê** de um servidor reiniciar — seja por:
 - Kernel Panic  
@@ -72,8 +72,8 @@ sudo ./verifica-reinicio.sh --full
 
 ### Salvar relatório em arquivo
 
-Gera `/tmp/analise-reinicio-HOST-AAAA-MM-DD_HH-MM-SS.log`:
-`HOST` é o hostname detectado.
+Gera `/tmp/analise-reinicio-HOST-AAAA-MM-DD_HH-MM-SS-XXXXXX.log`:
+`HOST` é o hostname detectado. `XXXXXX` é um sufixo aleatório.
 
 ```bash
 sudo ./verifica-reinicio.sh --save
