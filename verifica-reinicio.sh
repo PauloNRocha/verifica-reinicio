@@ -17,7 +17,7 @@
 #   https://www.gnu.org/licenses/gpl-3.0.txt
 #
 
-set -o pipefail
+set -euo pipefail
 
 # =========================[ CORES ]=======================================
 
@@ -45,9 +45,21 @@ FULL_LIMIT=8000
 
 JOURNAL_VOLATILE=0   # 1 = journald não persistente (apenas boot atual)
 
+BOOT_LIST_LIMIT_FAST=5
+BOOT_LIST_LIMIT_FULL=15
+EVID_LIMIT_FAST=5
+EVID_LIMIT_FULL=12
+
+SHUTDOWN_TS=""
+IPMI_AVAILABLE=0
+IPMI_SEL_TIME=""
+IPMI_SEL_LIST=""
+IPMI_SEL_NEAR=""
+
 # =======================[ AJUDA ]=========================================
 
 show_help() {
+    local status="${1:-0}"
 cat << EOF
 ${C_BOLD}Uso:${C_RESET} sudo $0 [opções]
 
@@ -66,7 +78,7 @@ Exemplos:
   sudo $0 --save
   sudo $0 --full --save
 EOF
-exit 0
+exit "$status"
 }
 
 # =======================[ PARSE ARGS ]====================================
@@ -87,7 +99,7 @@ parse_args() {
             *)
                 init_colors
                 echo -e "${C_RED}ERRO:${C_RESET} opção desconhecida: $arg" >&2
-                show_help
+                show_help 1
                 ;;
         esac
     done
@@ -123,15 +135,31 @@ mostra_info_sistema() {
     echo
 }
 
-mostra_boot_logs() {
-    echo -e "${C_BOLD}${C_CYAN}==== ÚLTIMOS EVENTOS DE BOOT/REINÍCIO ====${C_RESET}"
-    if command -v last >/dev/null 2>&1; then
-        # -n para evitar ler wtmp gigantesco
-        last -x -n 12
+mostra_boot_overview() {
+    local limit="$BOOT_LIST_LIMIT_FAST"
+    [[ "$MODE" == "FULL" ]] && limit="$BOOT_LIST_LIMIT_FULL"
+
+    echo -e "${C_BOLD}${C_CYAN}==== HISTÓRICO DE BOOTS (journalctl --list-boots) ====${C_RESET}"
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl --list-boots --no-pager 2>/dev/null | tail -n "$limit" || true
     else
-        echo "Comando 'last' não encontrado."
+        echo "Comando 'journalctl' não encontrado."
     fi
     echo
+
+    echo -e "${C_BOLD}${C_CYAN}Boot registrado (who -b):${C_RESET}"
+    if command -v who >/dev/null 2>&1; then
+        who -b || true
+    else
+        echo "Comando 'who' não encontrado."
+    fi
+    echo
+
+    if [[ "$MODE" == "FULL" ]] && command -v systemd-analyze >/dev/null 2>&1; then
+        echo -e "${C_BOLD}${C_CYAN}systemd-analyze:${C_RESET}"
+        systemd-analyze 2>/dev/null || true
+        echo
+    fi
 }
 
 # =======================[ CRASH DUMPS ]===================================
@@ -176,7 +204,20 @@ coleta_journal_boot_anterior() {
     local limite="$FAST_LIMIT"
     [[ "$MODE" == "FULL" ]] && limite="$FULL_LIMIT"
 
-    journalctl -b -1 -n "$limite" --no-pager 2>/dev/null
+    journalctl -b -1 -n "$limite" --no-pager -o short-iso 2>/dev/null || true
+}
+
+coleta_journal_kernel_boot_anterior() {
+    echo -e "${C_DIM}Coletando logs do kernel do boot anterior (journalctl -b -1 -k)...${C_RESET}" >&2
+
+    if ! journalctl -b -1 -k -n 1 >/dev/null 2>&1; then
+        return
+    fi
+
+    local limite="$FAST_LIMIT"
+    [[ "$MODE" == "FULL" ]] && limite="$FULL_LIMIT"
+
+    journalctl -b -1 -k -n "$limite" --no-pager -o short-iso 2>/dev/null || true
 }
 
 # =======================[ LOGS AUXILIARES (/var/log) ]====================
@@ -205,17 +246,19 @@ coleta_logs_aux() {
     add_logs "/var/log/messages*"
     add_logs "/var/log/dmesg*"
 
-    local regex='kernel panic|fatal exception|BUG: kernel|oom-killer|out of memory|watchdog: BUG:|soft lockup - CPU#|hard lockup - CPU#|NMI watchdog: Watchdog detected|thermal.*critical|critical temperature|Machine Check Exception|hardware error|I/O error|EXT[2-4]-fs error|xfs.*error|segfault|reboot: System reboot|Restarting system'
+    local regex='kernel panic|fatal exception|Oops:|BUG:|hard lockup|soft lockup|watchdog: BUG|Watchdog detected|hung task|hung_task|oom-killer|out of memory|thermal.*critical|critical temperature|Machine Check Exception|hardware error|I/O error|EXT[2-4]-fs error|xfs.*error|segfault|reboot: System reboot|Restarting system|power failure|ac lost|power loss|power supply|psu|mains power|line power|power outage|brownout|\<ups\>|upsd|apcupsd'
 
     local saida=""
     local max_lines=10000
 
     if ((${#arquivos_text[@]} > 0)); then
-        saida+="$(grep -siE "$regex" "${arquivos_text[@]}" 2>/dev/null | tail -n $max_lines)"$'\n'
+        saida+="$(grep -siE "$regex" "${arquivos_text[@]}" 2>/dev/null | tail -n $max_lines || true)"$'\n'
     fi
 
-    if [[ "$MODE" == "FULL" && ${#arquivos_gz[@]} -gt 0 && -n "$(command -v zgrep 2>/dev/null)" ]]; then
-        saida+="$(zgrep -siE "$regex" "${arquivos_gz[@]}" 2>/dev/null | tail -n $max_lines)"$'\n'
+    if [[ "$MODE" == "FULL" && ${#arquivos_gz[@]} -gt 0 ]]; then
+        if command -v zgrep >/dev/null 2>&1; then
+            saida+="$(zgrep -siE "$regex" "${arquivos_gz[@]}" 2>/dev/null | tail -n $max_lines || true)"$'\n'
+        fi
     fi
 
     echo "$saida" | sed '/^$/d' | tail -n 120
@@ -225,16 +268,20 @@ coleta_logs_aux() {
 
 analisa_reinicio() {
     local journal="$1"
-    local aux="$2"
-    local journal_volatile="$3"
+    local journal_kernel="$2"
+    local aux="$3"
+    local journal_volatile="$4"
+    local ipmi_near="$5"
 
     local motivo_plain=""
     local motivo_color="$C_RESET"
     local trecho=""
     local origem=""
+    local evid_limit="$EVID_LIMIT_FAST"
+    [[ "$MODE" == "FULL" ]] && evid_limit="$EVID_LIMIT_FULL"
 
     local shutdown_limpo=0
-    if [[ -n "$journal" ]] && grep -qiE 'systemd-shutdown\[|Shutting down\.|Reached target (Shutdown|Reboot|Power)' <<< "$journal"; then
+    if [[ -n "$journal" ]] && grep -qiE 'systemd-shutdown\[|Shutting down\.|Reached target (Shutdown|Reboot|Power)|Powering off|System is powering down' <<< "$journal"; then
         shutdown_limpo=1
     fi
 
@@ -248,47 +295,65 @@ analisa_reinicio() {
         if [[ -z "$motivo_plain" ]] && grep -qiE "$regex" <<< "$LOGSOURCE"; then
             motivo_plain="$label"
             motivo_color="$color"
-            trecho="$(grep -iE "$regex" <<< "$LOGSOURCE" | head -n 10)"
+            trecho="$(grep -iE "$regex" <<< "$LOGSOURCE" | head -n "$evid_limit")"
             origem="$src"
         fi
     }
 
-    local rx_panic='kernel panic|fatal exception|BUG: kernel'
+    local rx_crash='kernel panic|fatal exception|Oops:|BUG:|hard lockup|soft lockup|watchdog: BUG|Watchdog detected|hung task|hung_task'
     local rx_oom='oom-killer|out of memory'
-    local rx_watchdog='watchdog: BUG:|soft lockup - CPU#|hard lockup - CPU#|NMI watchdog'
     local rx_thermal='thermal.*critical|critical temperature'
     local rx_hw='Machine Check Exception|hardware error'
     local rx_disk='I/O error|EXT[2-4]-fs error|xfs.*error'
     local rx_seg='segfault'
-    local rx_powerbtn='systemd-logind\[.*\]: Power key pressed'
+    local rx_powerkey='systemd-logind\[.*\]: (Power key pressed short|Power key pressed|Powering off|System is powering down)'
+    local rx_powerloss='power failure|ac lost|power loss|power supply|psu|mains power|line power|power outage|brownout|\<ups\>|upsd|apcupsd'
     local rx_update='unattended-upgrade|dpkg:.*linux-image|apt-get.*(dist-upgrade|full-upgrade)'
     local rx_reboot='reboot: System reboot|Restarting system'
 
     # Primeiro: tentar achar causa no journal do boot anterior (se existir)
     if [[ -n "$journal" ]]; then
-        detecta_nos_logs "$journal" "$rx_panic"    "Kernel panic ou falha grave no kernel" "$C_RED"    "journal"
-        detecta_nos_logs "$journal" "$rx_oom"      "Falta de memória (OOM)"               "$C_RED"    "journal"
-        detecta_nos_logs "$journal" "$rx_watchdog" "Travamento de CPU (Watchdog)"         "$C_RED"    "journal"
-        detecta_nos_logs "$journal" "$rx_thermal"  "Problema térmico (temperatura crítica)" "$C_RED"  "journal"
-        detecta_nos_logs "$journal" "$rx_hw"       "Erro de hardware (MCE)"               "$C_RED"    "journal"
-        detecta_nos_logs "$journal" "$rx_disk"     "Erro de disco/filesystem"             "$C_RED"    "journal"
-        detecta_nos_logs "$journal" "$rx_seg"      "Segfault crítico em processo"         "$C_YELLOW" "journal"
-        detecta_nos_logs "$journal" "$rx_powerbtn" "Botão de energia pressionado"         "$C_YELLOW" "journal"
-        detecta_nos_logs "$journal" "$rx_update"   "Reboot possivelmente causado por atualização (apt/dpkg)" "$C_GREEN" "journal"
+        local kernel_src="$journal_kernel"
+        [[ -z "$kernel_src" ]] && kernel_src="$journal"
+
+        detecta_nos_logs "$kernel_src" "$rx_crash" "Kernel panic / travamento"            "$C_RED"    "journal"
+        detecta_nos_logs "$journal"    "$rx_oom"   "Falta de memória (OOM)"               "$C_RED"    "journal"
+        detecta_nos_logs "$journal"    "$rx_powerloss" "Perda/instabilidade de energia (rede elétrica/UPS/PSU)" "$C_RED" "journal"
+        detecta_nos_logs "$journal"    "$rx_powerkey"  "Shutdown via ACPI/Power key (possível glitch elétrico, UPS, ou botão)" "$C_YELLOW" "journal"
+        detecta_nos_logs "$journal"    "$rx_thermal"   "Problema térmico (temperatura crítica)" "$C_RED"  "journal"
+        detecta_nos_logs "$journal"    "$rx_hw"        "Erro de hardware (MCE)"               "$C_RED"    "journal"
+        detecta_nos_logs "$journal"    "$rx_disk"      "Erro de disco/filesystem"             "$C_RED"    "journal"
+        detecta_nos_logs "$journal"    "$rx_seg"       "Segfault crítico em processo"         "$C_YELLOW" "journal"
+        detecta_nos_logs "$journal"    "$rx_update"    "Reboot possivelmente causado por atualização (apt/dpkg)" "$C_GREEN" "journal"
         detecta_nos_logs "$journal" "$rx_reboot"   "Reinício normal (sequência registrada)" "$C_GREEN" "journal"
     fi
 
     # Segundo: logs auxiliares de /var/log, mas APENAS se não achamos motivo antes.
-    # E mesmo assim, são tratados como "causa provável" somente quando temos logs persistentes.
-    if [[ -z "$motivo_plain" && -n "$aux" && "$MODE" == "FULL" && $journal_volatile -eq 0 ]]; then
-        detecta_nos_logs "$aux" "$rx_panic"    "Kernel panic ou falha grave no kernel (logs auxiliares)" "$C_RED"    "aux"
-        detecta_nos_logs "$aux" "$rx_oom"      "Falta de memória (OOM) (logs auxiliares)"               "$C_RED"    "aux"
-        detecta_nos_logs "$aux" "$rx_watchdog" "Travamento de CPU (Watchdog) (logs auxiliares)"         "$C_RED"    "aux"
-        detecta_nos_logs "$aux" "$rx_thermal"  "Problema térmico (logs auxiliares)"                     "$C_RED"    "aux"
-        detecta_nos_logs "$aux" "$rx_hw"       "Erro de hardware (MCE) (logs auxiliares)"               "$C_RED"    "aux"
-        detecta_nos_logs "$aux" "$rx_disk"     "Erro de disco/filesystem (logs auxiliares)"             "$C_RED"    "aux"
-        detecta_nos_logs "$aux" "$rx_seg"      "Segfault crítico (logs auxiliares)"                     "$C_YELLOW" "aux"
-        detecta_nos_logs "$aux" "$rx_reboot"   "Reinício normal (encontrado em logs auxiliares)"        "$C_GREEN"  "aux"
+    # Tratados como "causa provável" por poderem ser antigos.
+    if [[ -z "$motivo_plain" && -n "$aux" && "$MODE" == "FULL" ]]; then
+        detecta_nos_logs "$aux" "$rx_crash"     "Kernel panic / travamento (logs auxiliares)" "$C_RED"    "aux"
+        detecta_nos_logs "$aux" "$rx_oom"       "Falta de memória (OOM) (logs auxiliares)"    "$C_RED"    "aux"
+        detecta_nos_logs "$aux" "$rx_powerloss" "Perda/instabilidade de energia (logs auxiliares)" "$C_RED" "aux"
+        detecta_nos_logs "$aux" "$rx_powerkey"  "Shutdown via ACPI/Power key (logs auxiliares)" "$C_YELLOW" "aux"
+        detecta_nos_logs "$aux" "$rx_thermal"   "Problema térmico (logs auxiliares)"         "$C_RED"    "aux"
+        detecta_nos_logs "$aux" "$rx_hw"        "Erro de hardware (MCE) (logs auxiliares)"   "$C_RED"    "aux"
+        detecta_nos_logs "$aux" "$rx_disk"      "Erro de disco/filesystem (logs auxiliares)" "$C_RED"    "aux"
+        detecta_nos_logs "$aux" "$rx_seg"       "Segfault crítico (logs auxiliares)"         "$C_YELLOW" "aux"
+        detecta_nos_logs "$aux" "$rx_reboot"    "Reinício normal (encontrado em logs auxiliares)" "$C_GREEN"  "aux"
+    fi
+
+    if [[ -n "$ipmi_near" ]] && grep -qiE "$rx_powerloss" <<< "$ipmi_near"; then
+        if [[ -z "$motivo_plain" \
+            || "$motivo_plain" == "Shutdown via ACPI/Power key (possível glitch elétrico, UPS, ou botão)" \
+            || "$motivo_plain" == "Reinício normal (sequência registrada)" \
+            || "$motivo_plain" == "Reboot possivelmente causado por atualização (apt/dpkg)" \
+            || "$motivo_plain" == "Reinício normal (encontrado em logs auxiliares)" \
+            || "$motivo_plain" == "Shutdown via ACPI/Power key (logs auxiliares)" ]]; then
+            motivo_plain="Perda/instabilidade de energia (rede elétrica/UPS/PSU)"
+            motivo_color="$C_RED"
+            trecho="$(grep -iE "$rx_powerloss" <<< "$ipmi_near" | head -n "$evid_limit")"
+            origem="ipmi"
+        fi
     fi
 
     echo -e "${C_BOLD}${C_GREEN}=========== ANÁLISE DO MOTIVO DO REINÍCIO ==========${C_RESET}"
@@ -297,6 +362,8 @@ analisa_reinicio() {
         echo -e "Motivo detectado: ${motivo_color}${motivo_plain}${C_RESET}"
         if [[ "$origem" == "aux" ]]; then
             echo -e "${C_DIM}(Baseado em logs auxiliares de /var/log — podem incluir eventos mais antigos, não apenas o último reboot.)${C_RESET}"
+        elif [[ "$origem" == "ipmi" ]]; then
+            echo -e "${C_DIM}(Baseado em eventos IPMI próximos ao shutdown.)${C_RESET}"
         fi
         echo
         echo -e "${C_BOLD}Evidência:${C_RESET}"
@@ -336,6 +403,110 @@ analisa_reinicio() {
         echo "===================================================="
         echo
     fi
+}
+
+# =======================[ SHUTDOWN TS ]====================================
+
+extrai_shutdown_ts() {
+    local journal="$1"
+    local pat='systemd-shutdown\[|Shutting down\.|Reached target (Shutdown|Reboot|Power)|Powering off|System is powering down'
+
+    local linha
+    linha="$(grep -iE "$pat" <<< "$journal" | tail -n 1 || true)"
+
+    if [[ -n "$linha" ]]; then
+        awk '{print $1" "$2}' <<< "$linha"
+    fi
+}
+
+# =======================[ IPMI ]==========================================
+
+filtra_ipmi_proximo() {
+    local shutdown_ts="$1"
+    local list="$2"
+
+    [[ -z "$shutdown_ts" || -z "$list" ]] && return 0
+
+    local shutdown_epoch
+    shutdown_epoch="$(date -d "$shutdown_ts" +%s 2>/dev/null || true)"
+    [[ -z "$shutdown_epoch" ]] && return 0
+
+    local window=900
+    local out=""
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local datetime
+        datetime="$(awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $1" "$2}' <<< "$line")"
+        [[ -z "$datetime" ]] && continue
+        local epoch
+        epoch="$(date -d "$datetime" +%s 2>/dev/null || true)"
+        [[ -z "$epoch" ]] && continue
+        local diff=$((epoch - shutdown_epoch))
+        diff=${diff#-}
+        if (( diff <= window )); then
+            out+="$line"$'\n'
+        fi
+    done <<< "$list"
+
+    echo "$out"
+}
+
+coleta_ipmi() {
+    if ! command -v ipmitool >/dev/null 2>&1; then
+        IPMI_AVAILABLE=0
+        return 0
+    fi
+
+    IPMI_AVAILABLE=1
+
+    modprobe ipmi_si >/dev/null 2>&1 || true
+    modprobe ipmi_devintf >/dev/null 2>&1 || true
+
+    IPMI_SEL_TIME="$(ipmitool sel time get 2>/dev/null || true)"
+    IPMI_SEL_LIST="$(ipmitool sel list 2>/dev/null | tail -n 50 || true)"
+    IPMI_SEL_NEAR="$(filtra_ipmi_proximo "$SHUTDOWN_TS" "$IPMI_SEL_LIST")"
+}
+
+# =======================[ LINHA DO TEMPO ]================================
+
+mostra_linha_tempo() {
+    local shutdown_ts="$1"
+
+    echo -e "${C_BOLD}${C_CYAN}Linha do tempo:${C_RESET}"
+    echo -e "${C_BOLD}Boot atual:${C_RESET}"
+    if uptime -s >/dev/null 2>&1; then
+        uptime -s
+    else
+        uptime || true
+    fi
+
+    if command -v who >/dev/null 2>&1; then
+        echo "who -b: $(who -b 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$shutdown_ts" ]]; then
+        echo "Shutdown no boot anterior: $shutdown_ts"
+    else
+        echo "Shutdown no boot anterior: (não encontrado)"
+    fi
+
+    if [[ "$MODE" == "FULL" ]]; then
+        if [[ "$IPMI_AVAILABLE" -eq 1 ]]; then
+            echo "IPMI SEL time: ${IPMI_SEL_TIME:-indisponível}"
+            if [[ -n "$IPMI_SEL_NEAR" ]]; then
+                echo "Eventos IPMI próximos ao shutdown:"
+                echo "$IPMI_SEL_NEAR"
+            else
+                echo "Eventos IPMI recentes (últimos 50):"
+                echo "$IPMI_SEL_LIST"
+            fi
+        else
+            echo "IPMI não disponível."
+        fi
+    fi
+
+    echo
 }
 
 # =======================[ TRECHO FINAL JOURNAL ]==========================
@@ -385,14 +556,26 @@ main() {
     echo
 
     mostra_info_sistema
-    mostra_boot_logs
+    mostra_boot_overview
     verifica_crash_dumps
 
-    local journal aux
+    local journal journal_kernel aux
     journal="$(coleta_journal_boot_anterior)"
-    aux="$(coleta_logs_aux)"
+    journal_kernel="$(coleta_journal_kernel_boot_anterior)"
 
-    analisa_reinicio "$journal" "$aux" "$JOURNAL_VOLATILE"
+    if [[ "$MODE" == "FULL" ]]; then
+        aux="$(coleta_logs_aux)"
+    else
+        aux=""
+    fi
+
+    SHUTDOWN_TS="$(extrai_shutdown_ts "$journal")"
+    if [[ "$MODE" == "FULL" ]]; then
+        coleta_ipmi
+    fi
+
+    analisa_reinicio "$journal" "$journal_kernel" "$aux" "$JOURNAL_VOLATILE" "$IPMI_SEL_NEAR"
+    mostra_linha_tempo "$SHUTDOWN_TS"
     mostra_trecho_journal "$journal" "$JOURNAL_VOLATILE"
 
     if [[ "$SAVE" -eq 1 ]]; then
