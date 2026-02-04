@@ -1,7 +1,7 @@
 # 🔍 verifica-reinicio.sh  
 Ferramenta avançada para diagnosticar o motivo do último reinício do sistema Linux.
 
-**Versão:** 1.2.3 (2026-02-04)
+**Versão:** 1.2.4 (2026-02-04)
 
 Criado para administradores que precisam entender **o porquê** de um servidor reiniciar — seja por:
 - Kernel Panic  

@@ -40,7 +40,7 @@ MODE="FAST"
 SAVE=0
 SAVE_FILE=""
 
-SCRIPT_VERSION="1.2.3"
+SCRIPT_VERSION="1.2.4"
 SCRIPT_DATE="2026-02-04"
 
 FAST_LIMIT=1500
@@ -53,6 +53,8 @@ BOOT_LIST_LIMIT_FULL=15
 EVID_LIMIT_FAST=5
 EVID_LIMIT_FULL=12
 CAUSE_WINDOW_SEC=1800
+EXIT_CODE=0
+CAUSE_FOUND=0
 
 SHUTDOWN_TS=""
 BOOT_END_TS=""
@@ -127,7 +129,7 @@ parse_args() {
 requer_root() {
     if [[ "$EUID" -ne 0 ]]; then
         echo -e "${C_RED}ERRO:${C_RESET} este script precisa ser executado como root."
-        exit 1
+        exit 3
     fi
 }
 
@@ -204,7 +206,18 @@ detecta_journal_volatile() {
 # =======================[ JOURNAL ]=======================================
 
 coleta_journal_boot_anterior() {
+    local ref_epoch="${1:-}"
+    local window_sec="${2:-$CAUSE_WINDOW_SEC}"
     echo -e "${C_DIM}Coletando logs do boot anterior (journalctl -b -1)...${C_RESET}" >&2
+
+    if ! command -v journalctl >/dev/null 2>&1; then
+        if [[ "$MODE" == "FAST" ]]; then
+            echo -e "${C_YELLOW}Aviso:${C_RESET} journalctl não encontrado. Use --full para tentar /var/log." >&2
+        else
+            echo -e "${C_YELLOW}Aviso:${C_RESET} journalctl não encontrado. Seguindo com /var/log." >&2
+        fi
+        return
+    fi
 
     if ! journalctl -b -1 -n 1 >/dev/null 2>&1; then
         if [[ $JOURNAL_VOLATILE -eq 1 ]]; then
@@ -222,11 +235,23 @@ coleta_journal_boot_anterior() {
     local limite="$FAST_LIMIT"
     [[ "$MODE" == "FULL" ]] && limite="$FULL_LIMIT"
 
-    journalctl -b -1 -n "$limite" --no-pager -o short-iso 2>/dev/null || true
+    if [[ -n "$ref_epoch" ]]; then
+        local since_epoch=$((ref_epoch - window_sec))
+        (( since_epoch < 0 )) && since_epoch=0
+        journalctl -b -1 --since "@$since_epoch" --until "@$ref_epoch" -n "$limite" --no-pager -o short-iso 2>/dev/null || true
+    else
+        journalctl -b -1 -n "$limite" --no-pager -o short-iso 2>/dev/null || true
+    fi
 }
 
 coleta_journal_kernel_boot_anterior() {
+    local ref_epoch="${1:-}"
+    local window_sec="${2:-$CAUSE_WINDOW_SEC}"
     echo -e "${C_DIM}Coletando logs do kernel do boot anterior (journalctl -b -1 -k)...${C_RESET}" >&2
+
+    if ! command -v journalctl >/dev/null 2>&1; then
+        return
+    fi
 
     if ! journalctl -b -1 -k -n 1 >/dev/null 2>&1; then
         return
@@ -235,7 +260,13 @@ coleta_journal_kernel_boot_anterior() {
     local limite="$FAST_LIMIT"
     [[ "$MODE" == "FULL" ]] && limite="$FULL_LIMIT"
 
-    journalctl -b -1 -k -n "$limite" --no-pager -o short-iso 2>/dev/null || true
+    if [[ -n "$ref_epoch" ]]; then
+        local since_epoch=$((ref_epoch - window_sec))
+        (( since_epoch < 0 )) && since_epoch=0
+        journalctl -b -1 -k --since "@$since_epoch" --until "@$ref_epoch" -n "$limite" --no-pager -o short-iso 2>/dev/null || true
+    else
+        journalctl -b -1 -k -n "$limite" --no-pager -o short-iso 2>/dev/null || true
+    fi
 }
 
 # =======================[ LOGS AUXILIARES (/var/log) ]====================
@@ -290,12 +321,12 @@ analisa_reinicio() {
     local aux="$3"
     local journal_volatile="$4"
     local ipmi_near="$5"
-    local ref_ts="$6"
 
     local motivo_plain=""
     local motivo_color="$C_RESET"
     local trecho=""
     local origem=""
+    local segfault_evid=""
     local evid_limit="$EVID_LIMIT_FAST"
     [[ "$MODE" == "FULL" ]] && evid_limit="$EVID_LIMIT_FULL"
 
@@ -320,7 +351,7 @@ analisa_reinicio() {
     }
 
     local rx_crash='kernel panic|fatal exception|Oops:|BUG:|hard lockup|soft lockup|watchdog: BUG|Watchdog detected|hung task|hung_task'
-    local rx_oom='oom-killer|out of memory'
+    local rx_oom='Out of memory: Kill process|Killed process|invoked oom-killer|Memory cgroup out of memory|oom-killer|out of memory'
     local rx_thermal='thermal.*critical|critical temperature'
     local rx_hw='Machine Check Exception|hardware error'
     local rx_disk='I/O error|EXT[2-4]-fs error|xfs.*error'
@@ -332,11 +363,6 @@ analisa_reinicio() {
 
     local journal_focus="$journal"
     local kernel_focus="$journal_kernel"
-
-    if [[ -n "$ref_ts" ]]; then
-        journal_focus="$(filtra_por_janela "$journal" "$ref_ts" "$CAUSE_WINDOW_SEC")"
-        kernel_focus="$(filtra_por_janela "$journal_kernel" "$ref_ts" "$CAUSE_WINDOW_SEC")"
-    fi
 
     # Primeiro: tentar achar causa no journal do boot anterior (se existir)
     if [[ -n "$journal_focus" || -n "$kernel_focus" ]]; then
@@ -350,7 +376,9 @@ analisa_reinicio() {
         detecta_nos_logs "$journal_focus" "$rx_thermal"   "Problema térmico (temperatura crítica)" "$C_RED"  "journal"
         detecta_nos_logs "$journal_focus" "$rx_hw"        "Erro de hardware (MCE)"               "$C_RED"    "journal"
         detecta_nos_logs "$journal_focus" "$rx_disk"      "Erro de disco/filesystem"             "$C_RED"    "journal"
-        detecta_nos_logs "$journal_focus" "$rx_seg"       "Segfault crítico em processo"         "$C_YELLOW" "journal"
+        if [[ -z "$segfault_evid" ]] && grep -qiE "$rx_seg" <<< "$journal_focus"; then
+            segfault_evid="$(grep -iE "$rx_seg" <<< "$journal_focus" | head -n "$evid_limit")"
+        fi
         if [[ $shutdown_limpo -eq 1 ]]; then
             detecta_nos_logs "$journal_focus" "$rx_update" "Reboot possivelmente causado por atualização (apt/dpkg)" "$C_GREEN" "journal"
         fi
@@ -367,7 +395,9 @@ analisa_reinicio() {
         detecta_nos_logs "$aux" "$rx_thermal"   "Problema térmico (logs auxiliares)"         "$C_RED"    "aux"
         detecta_nos_logs "$aux" "$rx_hw"        "Erro de hardware (MCE) (logs auxiliares)"   "$C_RED"    "aux"
         detecta_nos_logs "$aux" "$rx_disk"      "Erro de disco/filesystem (logs auxiliares)" "$C_RED"    "aux"
-        detecta_nos_logs "$aux" "$rx_seg"       "Segfault crítico (logs auxiliares)"         "$C_YELLOW" "aux"
+        if [[ -z "$segfault_evid" ]] && grep -qiE "$rx_seg" <<< "$aux"; then
+            segfault_evid="$(grep -iE "$rx_seg" <<< "$aux" | head -n "$evid_limit")"
+        fi
         detecta_nos_logs "$aux" "$rx_reboot"    "Reinício normal (encontrado em logs auxiliares)" "$C_GREEN"  "aux"
     fi
 
@@ -397,9 +427,11 @@ analisa_reinicio() {
         echo
         echo -e "${C_BOLD}Evidência:${C_RESET}"
         echo "$trecho"
+        CAUSE_FOUND=1
 
     elif [[ $shutdown_limpo -eq 1 ]]; then
         echo -e "Reinício normal: sequência de desligamento detectada no journal (systemd-shutdown / Shutting down)."
+        CAUSE_FOUND=1
 
     else
         if [[ $journal_volatile -eq 1 && -z "$journal" ]]; then
@@ -408,14 +440,18 @@ analisa_reinicio() {
                 echo "Foram analisados logs auxiliares em /var/log, mas não foi possível determinar com segurança o motivo do último reboot."
             fi
             echo -e "Resultado: ${C_YELLOW}INCONCLUSIVO por falta de logs persistentes.${C_RESET}"
+            EXIT_CODE=2
         else
             if [[ -z "$journal" && -z "$aux" ]]; then
                 echo -e "${C_YELLOW}Inconclusivo:${C_RESET} não há logs suficientes no journal nem em /var/log."
+                EXIT_CODE=2
             elif [[ -n "$journal" && $shutdown_limpo -eq 0 ]]; then
                 echo -e "${C_RED}Reinício possivelmente abrupto:${C_RESET} não há sequência normal de shutdown no journal."
                 echo "Provável travamento, reset físico ou queda de energia."
+                CAUSE_FOUND=1
             else
                 echo -e "${C_YELLOW}Inconclusivo:${C_RESET} não foi possível identificar um motivo claro com os logs disponíveis."
+                EXIT_CODE=2
             fi
         fi
     fi
@@ -425,12 +461,20 @@ analisa_reinicio() {
 
     # Se não encontramos um motivo conclusivo, mas temos logs auxiliares,
     # mostramos apenas como INDÍCIOS (principalmente útil em journald volátil).
-    if [[ -z "$motivo_plain" && -n "$aux" ]]; then
-        echo "------ Indícios em logs históricos (/var/log) ------"
-        echo "$aux"
-        echo "(Atenção: estes eventos podem ser antigos e NÃO estão sendo usados como causa direta do último reboot.)"
-        echo "===================================================="
-        echo
+    if [[ -z "$motivo_plain" ]]; then
+        if [[ -n "$segfault_evid" ]]; then
+            echo "------ Indícios no journal (boot anterior) ------"
+            echo "$segfault_evid"
+            echo "===================================================="
+            echo
+        fi
+        if [[ -n "$aux" ]]; then
+            echo "------ Indícios em logs históricos (/var/log) ------"
+            echo "$aux"
+            echo "(Atenção: estes eventos podem ser antigos e NÃO estão sendo usados como causa direta do último reboot.)"
+            echo "===================================================="
+            echo
+        fi
     fi
 }
 
@@ -459,39 +503,13 @@ extrai_ultimo_ts() {
 
 extrai_fim_boot_list() {
     local linha
+    if ! command -v journalctl >/dev/null 2>&1; then
+        return
+    fi
     linha="$(journalctl --list-boots --no-pager 2>/dev/null | awk '$1=="-1"{print $0}' | tail -n 1 || true)"
     if [[ -n "$linha" ]]; then
         awk '{if (NF>=8) {print $(NF-2)" "$(NF-1)" "$NF}}' <<< "$linha"
     fi
-}
-
-filtra_por_janela() {
-    local logs="$1"
-    local ref_ts="$2"
-    local window_sec="$3"
-
-    [[ -z "$logs" || -z "$ref_ts" ]] && { echo "$logs"; return 0; }
-
-    local ref_epoch
-    ref_epoch="$(LC_ALL=C date -d "$ref_ts" +%s 2>/dev/null || true)"
-    [[ -z "$ref_epoch" ]] && { echo "$logs"; return 0; }
-
-    local min_epoch=$((ref_epoch - window_sec))
-    local out=""
-
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local ts
-        ts="$(awk '{print $1" "$2}' <<< "$line")"
-        local epoch
-        epoch="$(LC_ALL=C date -d "$ts" +%s 2>/dev/null || true)"
-        [[ -z "$epoch" ]] && continue
-        if (( epoch >= min_epoch && epoch <= ref_epoch )); then
-            out+="$line"$'\n'
-        fi
-    done <<< "$logs"
-
-    echo "$out"
 }
 
 # =======================[ IPMI ]==========================================
@@ -679,8 +697,14 @@ main() {
     verifica_crash_dumps
 
     local journal journal_kernel aux
-    journal="$(coleta_journal_boot_anterior)"
-    journal_kernel="$(coleta_journal_kernel_boot_anterior)"
+    BOOT_END_TS="$(extrai_fim_boot_list)"
+    REF_TS="$BOOT_END_TS"
+    local ref_epoch=""
+    if [[ -n "$REF_TS" ]]; then
+        ref_epoch="$(LC_ALL=C date -d "$REF_TS" +%s 2>/dev/null || true)"
+    fi
+    journal="$(coleta_journal_boot_anterior "$ref_epoch" "$CAUSE_WINDOW_SEC")"
+    journal_kernel="$(coleta_journal_kernel_boot_anterior "$ref_epoch" "$CAUSE_WINDOW_SEC")"
 
     if [[ "$MODE" == "FULL" ]]; then
         aux="$(coleta_logs_aux)"
@@ -689,7 +713,6 @@ main() {
     fi
 
     SHUTDOWN_TS="$(extrai_shutdown_ts "$journal")"
-    BOOT_END_TS="$(extrai_fim_boot_list)"
     [[ -z "$BOOT_END_TS" ]] && BOOT_END_TS="$(extrai_ultimo_ts "$journal")"
     REF_TS="$SHUTDOWN_TS"
     [[ -z "$REF_TS" ]] && REF_TS="$BOOT_END_TS"
@@ -697,13 +720,21 @@ main() {
         coleta_ipmi
     fi
 
-    analisa_reinicio "$journal" "$journal_kernel" "$aux" "$JOURNAL_VOLATILE" "$IPMI_SEL_NEAR" "$REF_TS"
+    analisa_reinicio "$journal" "$journal_kernel" "$aux" "$JOURNAL_VOLATILE" "$IPMI_SEL_NEAR"
     mostra_linha_tempo "$SHUTDOWN_TS" "$BOOT_END_TS"
     mostra_trecho_journal "$journal" "$JOURNAL_VOLATILE"
 
     if [[ "$SAVE" -eq 1 ]]; then
         echo "Relatório salvo em: $SAVE_FILE"
     fi
+
+    if [[ "$EXIT_CODE" -eq 0 && "$CAUSE_FOUND" -eq 1 ]]; then
+        exit 0
+    fi
+    if [[ "$EXIT_CODE" -eq 0 ]]; then
+        exit 2
+    fi
+    exit "$EXIT_CODE"
 }
 
 main "$@"
