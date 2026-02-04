@@ -40,8 +40,8 @@ MODE="FAST"
 SAVE=0
 SAVE_FILE=""
 
-SCRIPT_VERSION="1.2.1"
-SCRIPT_DATE="2026-02-03"
+SCRIPT_VERSION="1.2.3"
+SCRIPT_DATE="2026-02-04"
 
 FAST_LIMIT=1500
 FULL_LIMIT=8000
@@ -52,8 +52,11 @@ BOOT_LIST_LIMIT_FAST=5
 BOOT_LIST_LIMIT_FULL=15
 EVID_LIMIT_FAST=5
 EVID_LIMIT_FULL=12
+CAUSE_WINDOW_SEC=1800
 
 SHUTDOWN_TS=""
+BOOT_END_TS=""
+REF_TS=""
 IPMI_AVAILABLE=0
 IPMI_SEL_TIME=""
 IPMI_SEL_LIST=""
@@ -287,6 +290,7 @@ analisa_reinicio() {
     local aux="$3"
     local journal_volatile="$4"
     local ipmi_near="$5"
+    local ref_ts="$6"
 
     local motivo_plain=""
     local motivo_color="$C_RESET"
@@ -326,21 +330,31 @@ analisa_reinicio() {
     local rx_update='unattended-upgrade|dpkg:.*linux-image|apt-get.*(dist-upgrade|full-upgrade)'
     local rx_reboot='reboot: System reboot|Restarting system|machine_restart'
 
+    local journal_focus="$journal"
+    local kernel_focus="$journal_kernel"
+
+    if [[ -n "$ref_ts" ]]; then
+        journal_focus="$(filtra_por_janela "$journal" "$ref_ts" "$CAUSE_WINDOW_SEC")"
+        kernel_focus="$(filtra_por_janela "$journal_kernel" "$ref_ts" "$CAUSE_WINDOW_SEC")"
+    fi
+
     # Primeiro: tentar achar causa no journal do boot anterior (se existir)
-    if [[ -n "$journal" ]]; then
-        local kernel_src="$journal_kernel"
-        [[ -z "$kernel_src" ]] && kernel_src="$journal"
+    if [[ -n "$journal_focus" || -n "$kernel_focus" ]]; then
+        local kernel_src="$kernel_focus"
+        [[ -z "$kernel_src" ]] && kernel_src="$journal_focus"
 
         detecta_nos_logs "$kernel_src" "$rx_crash" "Kernel panic / travamento"            "$C_RED"    "journal"
-        detecta_nos_logs "$journal"    "$rx_oom"   "Falta de memória (OOM)"               "$C_RED"    "journal"
-        detecta_nos_logs "$journal"    "$rx_powerloss" "Perda/instabilidade de energia (rede elétrica/UPS/PSU)" "$C_RED" "journal"
-        detecta_nos_logs "$journal"    "$rx_powerkey"  "Shutdown via ACPI/Power key (possível glitch elétrico, UPS, ou botão)" "$C_YELLOW" "journal"
-        detecta_nos_logs "$journal"    "$rx_thermal"   "Problema térmico (temperatura crítica)" "$C_RED"  "journal"
-        detecta_nos_logs "$journal"    "$rx_hw"        "Erro de hardware (MCE)"               "$C_RED"    "journal"
-        detecta_nos_logs "$journal"    "$rx_disk"      "Erro de disco/filesystem"             "$C_RED"    "journal"
-        detecta_nos_logs "$journal"    "$rx_seg"       "Segfault crítico em processo"         "$C_YELLOW" "journal"
-        detecta_nos_logs "$journal"    "$rx_update"    "Reboot possivelmente causado por atualização (apt/dpkg)" "$C_GREEN" "journal"
-        detecta_nos_logs "$journal" "$rx_reboot"   "Reinício normal (sequência registrada)" "$C_GREEN" "journal"
+        detecta_nos_logs "$journal_focus" "$rx_oom"   "Falta de memória (OOM)"               "$C_RED"    "journal"
+        detecta_nos_logs "$journal_focus" "$rx_powerloss" "Perda/instabilidade de energia (rede elétrica/UPS/PSU)" "$C_RED" "journal"
+        detecta_nos_logs "$journal_focus" "$rx_powerkey"  "Shutdown via ACPI/Power key (possível glitch elétrico, UPS, ou botão)" "$C_YELLOW" "journal"
+        detecta_nos_logs "$journal_focus" "$rx_thermal"   "Problema térmico (temperatura crítica)" "$C_RED"  "journal"
+        detecta_nos_logs "$journal_focus" "$rx_hw"        "Erro de hardware (MCE)"               "$C_RED"    "journal"
+        detecta_nos_logs "$journal_focus" "$rx_disk"      "Erro de disco/filesystem"             "$C_RED"    "journal"
+        detecta_nos_logs "$journal_focus" "$rx_seg"       "Segfault crítico em processo"         "$C_YELLOW" "journal"
+        if [[ $shutdown_limpo -eq 1 ]]; then
+            detecta_nos_logs "$journal_focus" "$rx_update" "Reboot possivelmente causado por atualização (apt/dpkg)" "$C_GREEN" "journal"
+        fi
+        detecta_nos_logs "$journal_focus" "$rx_reboot"   "Reinício normal (sequência registrada)" "$C_GREEN" "journal"
     fi
 
     # Segundo: logs auxiliares de /var/log, mas APENAS se não achamos motivo antes.
@@ -434,6 +448,52 @@ extrai_shutdown_ts() {
     fi
 }
 
+extrai_ultimo_ts() {
+    local journal="$1"
+    local linha
+    linha="$(tail -n 1 <<< "$journal" 2>/dev/null || true)"
+    if [[ -n "$linha" ]]; then
+        awk '{print $1" "$2}' <<< "$linha"
+    fi
+}
+
+extrai_fim_boot_list() {
+    local linha
+    linha="$(journalctl --list-boots --no-pager 2>/dev/null | awk '$1=="-1"{print $0}' | tail -n 1 || true)"
+    if [[ -n "$linha" ]]; then
+        awk '{if (NF>=8) {print $(NF-2)" "$(NF-1)" "$NF}}' <<< "$linha"
+    fi
+}
+
+filtra_por_janela() {
+    local logs="$1"
+    local ref_ts="$2"
+    local window_sec="$3"
+
+    [[ -z "$logs" || -z "$ref_ts" ]] && { echo "$logs"; return 0; }
+
+    local ref_epoch
+    ref_epoch="$(LC_ALL=C date -d "$ref_ts" +%s 2>/dev/null || true)"
+    [[ -z "$ref_epoch" ]] && { echo "$logs"; return 0; }
+
+    local min_epoch=$((ref_epoch - window_sec))
+    local out=""
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local ts
+        ts="$(awk '{print $1" "$2}' <<< "$line")"
+        local epoch
+        epoch="$(LC_ALL=C date -d "$ts" +%s 2>/dev/null || true)"
+        [[ -z "$epoch" ]] && continue
+        if (( epoch >= min_epoch && epoch <= ref_epoch )); then
+            out+="$line"$'\n'
+        fi
+    done <<< "$logs"
+
+    echo "$out"
+}
+
 # =======================[ IPMI ]==========================================
 
 filtra_ipmi_proximo() {
@@ -480,18 +540,25 @@ coleta_ipmi() {
 
     if command -v timeout >/dev/null 2>&1; then
         IPMI_SEL_TIME="$(timeout 8s ipmitool sel time get 2>/dev/null || true)"
-        IPMI_SEL_LIST="$(timeout 12s ipmitool sel list 2>/dev/null | tail -n 50 || true)"
+        IPMI_SEL_LIST="$(timeout 12s ipmitool sel list last 50 2>/dev/null || true)"
+        if [[ -z "$IPMI_SEL_LIST" ]]; then
+            IPMI_SEL_LIST="$(timeout 12s ipmitool sel list 2>/dev/null | tail -n 50 || true)"
+        fi
     else
         IPMI_SEL_TIME="$(ipmitool sel time get 2>/dev/null || true)"
-        IPMI_SEL_LIST="$(ipmitool sel list 2>/dev/null | tail -n 50 || true)"
+        IPMI_SEL_LIST="$(ipmitool sel list last 50 2>/dev/null || true)"
+        if [[ -z "$IPMI_SEL_LIST" ]]; then
+            IPMI_SEL_LIST="$(ipmitool sel list 2>/dev/null | tail -n 50 || true)"
+        fi
     fi
-    IPMI_SEL_NEAR="$(filtra_ipmi_proximo "$SHUTDOWN_TS" "$IPMI_SEL_LIST")"
+    IPMI_SEL_NEAR="$(filtra_ipmi_proximo "$REF_TS" "$IPMI_SEL_LIST")"
 }
 
 # =======================[ LINHA DO TEMPO ]================================
 
 mostra_linha_tempo() {
     local shutdown_ts="$1"
+    local boot_end_ts="$2"
 
     echo -e "${C_BOLD}${C_CYAN}Linha do tempo:${C_RESET}"
     echo -e "${C_BOLD}Boot atual:${C_RESET}"
@@ -509,6 +576,9 @@ mostra_linha_tempo() {
         echo "Shutdown no boot anterior: $shutdown_ts"
     else
         echo "Shutdown no boot anterior: (não encontrado)"
+        if [[ -n "$boot_end_ts" ]]; then
+            echo "Último log do boot anterior: $boot_end_ts"
+        fi
     fi
 
     if [[ "$MODE" == "FULL" ]]; then
@@ -619,12 +689,16 @@ main() {
     fi
 
     SHUTDOWN_TS="$(extrai_shutdown_ts "$journal")"
+    BOOT_END_TS="$(extrai_fim_boot_list)"
+    [[ -z "$BOOT_END_TS" ]] && BOOT_END_TS="$(extrai_ultimo_ts "$journal")"
+    REF_TS="$SHUTDOWN_TS"
+    [[ -z "$REF_TS" ]] && REF_TS="$BOOT_END_TS"
     if [[ "$MODE" == "FULL" ]]; then
         coleta_ipmi
     fi
 
-    analisa_reinicio "$journal" "$journal_kernel" "$aux" "$JOURNAL_VOLATILE" "$IPMI_SEL_NEAR"
-    mostra_linha_tempo "$SHUTDOWN_TS"
+    analisa_reinicio "$journal" "$journal_kernel" "$aux" "$JOURNAL_VOLATILE" "$IPMI_SEL_NEAR" "$REF_TS"
+    mostra_linha_tempo "$SHUTDOWN_TS" "$BOOT_END_TS"
     mostra_trecho_journal "$journal" "$JOURNAL_VOLATILE"
 
     if [[ "$SAVE" -eq 1 ]]; then
