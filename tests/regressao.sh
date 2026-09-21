@@ -28,9 +28,9 @@ analyze() {
     result="$(cat "$work/result")"
 }
 end='2026-02-04T12:21:20.500000-03:00'
-log="$end serv3 pvedaemon[2062]: successful auth"
-acpi='2026-02-04T12:21:20.400000-03:00 serv3 systemd-logind[800]: Power key pressed short'
-shutdown="$end serv3 systemd-shutdown[1]: Powering off."
+log="$end host-lab pvedaemon[2062]: successful auth"
+acpi='2026-02-04T12:21:20.400000-03:00 host-lab systemd-logind[800]: Power key pressed short'
+shutdown="$end host-lab systemd-shutdown[1]: Powering off."
 assert_eq "$(extrai_shutdown_ts "$shutdown")" "$end" 'timestamp sem hostname e com microssegundos'
 analyze "$log" '' '' ''
 assert_eq "$EXIT_CODE" 2 'abrupto sem causa continua inconclusivo'
@@ -53,29 +53,29 @@ assert_eq "$EXIT_CODE" 0 'mecanismo ACPI registrado'
 analyze "$shutdown" '' '' ''
 assert_eq "$EXIT_CODE" 0 'sequência final registrada'
 for msg in 'NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.' 'Out of memory: Killed process 12 (java)' 'Memory cgroup out of memory' 'BUG: soft lockup - CPU#1' 'segfault at 0' 'Oops: 0000' 'hung_task: blocked'; do
-    analyze "$log" "$end serv3 kernel: $msg" '' ''
+    analyze "$log" "$end host-lab kernel: $msg" '' ''
     assert_eq "$EXIT_CODE" 2 "evento isolado: $msg"
 done
-analyze "$log" "$end serv3 kernel: Kernel panic - not syncing" '' ''
+analyze "$log" "$end host-lab kernel: Kernel panic - not syncing" '' ''
 assert_eq "$EXIT_CODE" 0 'panic explícito'
 for msg in 'Started unattended-upgrades.service - Unattended Upgrades Shutdown.' 'Started apcupsd.service.' 'Power Supply fully redundant'; do
-    analyze "$end serv3 systemd[1]: $msg" '' '' ''
+    analyze "$end host-lab systemd[1]: $msg" '' '' ''
     assert_eq "$EXIT_CODE" 2 "mensagem normal: $msg"
 done
-analyze "$shutdown"$'\n'"$end serv3 systemd[1]: Started unattended-upgrades.service - Unattended Upgrades Shutdown." '' '' ''
+analyze "$shutdown"$'\n'"$end host-lab systemd[1]: Started unattended-upgrades.service - Unattended Upgrades Shutdown." '' '' ''
 if grep -qi 'causado por atualização' <<< "$result"; then exit 1; fi
 checks=$((checks + 1))
 IPMI_CLOCK_OK=1
 CURRENT_BOOT_EPOCH="$(date -d '2026-02-04T12:29:45-03:00' +%s)"
 near="$(filtra_ipmi_proximo "$end" "$sel")"
-assert_eq "$near" "$sel" 'caso serv3: último log 12:21 e SEL 12:28'
+assert_eq "$near" "$sel" 'caso host-lab: último log 12:21 e SEL 12:28'
 old='1394 | 02/03/2026 | 09:00:16 PM -03 | Power Supply #0x62 | Power Supply AC lost | Asserted'
 after='1398 | 02/04/2026 | 12:30:00 PM -03 | Power Supply #0x62 | Power Supply AC lost | Asserted'
 assert_eq "$(filtra_ipmi_proximo "$end" "$old"$'\n'"$after")" '' 'exclui eventos antigos e posteriores ao boot'
 IPMI_CLOCK_OK=0
 assert_eq "$(filtra_ipmi_proximo "$end" "$sel")" '' 'relógio não validado impede correlação'
 # Grande volume de evidências não deve causar SIGPIPE.
-large="$(awk 'BEGIN {for(i=0;i<20000;i++) print "2026-02-04T12:21:20-03:00 serv3 kernel: Kernel panic - not syncing"}')"
+large="$(awk 'BEGIN {for(i=0;i<20000;i++) print "2026-02-04T12:21:20-03:00 host-lab kernel: Kernel panic - not syncing"}')"
 analyze "$log" "$large" '' ''
 assert_eq "$EXIT_CODE" 0 'muitas evidências não interrompem análise'
 # Coleta simulada: horário fracionário precisa chegar intacto a --until.
@@ -165,7 +165,7 @@ journalctl() {
     if [[ "$1" == '--list-boots' ]]; then
         printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
     else
-        printf '%s\n' '1770218480.500000 serv3 kernel: last record'
+        printf '%s\n' '1770218480.500000 host-lab kernel: last record'
     fi
 }
 prepara_journal
