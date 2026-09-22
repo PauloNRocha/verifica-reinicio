@@ -2,7 +2,7 @@
 
 Ferramenta Bash para investigar o último reinício ou desligamento de um servidor Linux. Reúne registros do journal, identifica evidências e, no modo FULL, consulta logs históricos e o SEL do IPMI.
 
-**Versão:** 1.3.0 — 21 de setembro de 2026
+**Versão:** 1.3.1 — 22 de setembro de 2026
 
 O foco é Debian 12/13, Ubuntu e hosts Proxmox VE com systemd. A ferramenta não comprova automaticamente a causa de todo reinício: ausência de logs, retenção, relógios divergentes e falhas de hardware podem impedir uma conclusão.
 
@@ -115,7 +115,7 @@ Para usar o SEL na classificação:
 
 `Deasserted` indica que a condição deixou de estar ativa e não é tratado como nova perda de energia. `Fully Redundant` também não indica falha. Falhas de uma fonte redundante não comprovam interrupção total do host.
 
-Datas SEL com AM/PM e offset são normalizadas antes da comparação. Quando o BMC não informa fuso, assume-se o fuso local; confira essa configuração. A comparação com o relógio atual não garante que o BMC estava sincronizado na data do incidente.
+Datas SEL com ano de dois ou quatro dígitos, AM/PM e offset são normalizadas antes da comparação. Anos `00..68` representam `2000..2068`; `69..99`, `1969..1999`, conforme a convenção do GNU date. O relatório diferencia formato inválido de relógio divergente, mostra a hora do host na consulta e a diferença em segundos. Relógios históricos não são deslocados automaticamente. Quando o BMC não informa fuso, assume-se o fuso local; confira essa configuração. A comparação com o relógio atual não garante que o BMC estava sincronizado na data do incidente.
 
 Se o IPMI estiver ausente, falhar ou expirar, a análise continua com as outras fontes. Saída SEL parcial de uma consulta que falhou é descartada. Sem correlação confiável, os eventos são apenas históricos.
 

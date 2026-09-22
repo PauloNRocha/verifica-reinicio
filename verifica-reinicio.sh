@@ -39,8 +39,8 @@ MODE="FAST"
 SAVE=0
 SAVE_FILE=""
 
-SCRIPT_VERSION="1.3.0"
-SCRIPT_DATE="2026-09-21"
+SCRIPT_VERSION="1.3.1"
+SCRIPT_DATE="2026-09-22"
 
 FAST_LIMIT=1500
 FULL_LIMIT=8000
@@ -55,6 +55,8 @@ IPMI_LIST_TIMEOUT=60
 IPMI_TIME_WINDOW=900
 IPMI_CLOCK_TOLERANCE=300
 IPMI_CLOCK_OK=0
+IPMI_CLOCK_DELTA=""
+IPMI_HOST_TIME=""
 AUX_MAX_FILES=24
 AUX_MAX_BYTES=2097152
 AUX_TIMEOUT=5
@@ -416,8 +418,16 @@ extrai_shutdown_ts() {
 epoch_ipmi() {
     local raw="$1" d t period zone extra month day year hour minute second
     read -r d t period zone extra <<< "$raw"
-    [[ -z "$extra" && "$d" =~ ^[0-9]{2}/[0-9]{2}/[0-9]{4}$ && "$t" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || return 0
+    [[ -z "$extra" && "$d" =~ ^[0-9]{2}/[0-9]{2}/([0-9]{2}|[0-9]{4})$ && "$t" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || return 0
     IFS=/ read -r month day year <<< "$d"
+    # Mesma convenção do GNU date: 00..68 => 2000..2068; 69..99 => 1969..1999.
+    if [[ ${#year} -eq 2 ]]; then
+        if (( 10#$year <= 68 )); then
+            year=$((2000 + 10#$year))
+        else
+            year=$((1900 + 10#$year))
+        fi
+    fi
     IFS=: read -r hour minute second <<< "$t"
     hour=$((10#$hour))
     if [[ "$period" == "AM" || "$period" == "PM" ]]; then
@@ -456,9 +466,38 @@ filtra_ipmi_proximo() {
     done <<< "$list"
 }
 
+valida_relogio_ipmi() {
+    local raw="$1" host_epoch="$2" bmc_epoch direction magnitude
+    IPMI_CLOCK_OK=0
+    IPMI_CLOCK_DELTA=""
+    IPMI_HOST_TIME="$(LC_ALL=C date -d "@$host_epoch" '+%Y-%m-%dT%H:%M:%S%:z')"
+    bmc_epoch="$(epoch_ipmi "$raw")"
+    if [[ ! "$bmc_epoch" =~ ^-?[0-9]+$ ]]; then
+        printf 'Aviso: horário do BMC indisponível ou não interpretável: %s; SEL sem correlação.\n' "${raw:-vazio}" >&2
+        return 0
+    fi
+    if [[ ! "$raw" =~ ([+-][0-9]{2}(:?[0-9]{2})?|UTC|GMT)[[:space:]]*$ ]]; then
+        echo "Aviso: horário BMC sem fuso explícito; assumido o fuso do host." >&2
+    fi
+    IPMI_CLOCK_DELTA=$((host_epoch - bmc_epoch))
+    if (( IPMI_CLOCK_DELTA >= -IPMI_CLOCK_TOLERANCE && IPMI_CLOCK_DELTA <= IPMI_CLOCK_TOLERANCE )); then
+        IPMI_CLOCK_OK=1
+    else
+        direction="atrasado"
+        (( IPMI_CLOCK_DELTA < 0 )) && direction="adiantado"
+        magnitude="${IPMI_CLOCK_DELTA#-}"
+        printf 'Aviso: BMC %s %s segundos em relação ao host (%s); tolerância de %ss. SEL apenas como histórico.\n' \
+            "$direction" "$magnitude" "$IPMI_HOST_TIME" "$IPMI_CLOCK_TOLERANCE" >&2
+        echo "Os horários históricos não serão deslocados automaticamente; confira relógio/fuso do BMC." >&2
+    fi
+    return 0
+}
+
 coleta_ipmi() {
     IPMI_AVAILABLE=0
     IPMI_CLOCK_OK=0
+    IPMI_CLOCK_DELTA=""
+    IPMI_HOST_TIME=""
     IPMI_SEL_NEAR=""
     command -v ipmitool >/dev/null 2>&1 || return 0
     if command -v modprobe >/dev/null 2>&1; then
@@ -469,6 +508,8 @@ coleta_ipmi() {
     if ! IPMI_SEL_TIME="$(LC_ALL=C timeout -k 5s "${IPMI_TIMEOUT}s" ipmitool -I open sel time get 2>/dev/null)"; then
         IPMI_SEL_TIME=""
     fi
+    # Compara antes da consulta SEL, que pode levar até um minuto.
+    valida_relogio_ipmi "$IPMI_SEL_TIME" "$(date +%s)"
     # Descartamos saída parcial em timeout/erro; não equivale a um SEL completo.
     if ! IPMI_SEL_LIST="$(LC_ALL=C timeout -k 5s "${IPMI_LIST_TIMEOUT}s" ipmitool -I open sel list last 50 2>/dev/null)"; then
         IPMI_SEL_LIST=""
@@ -476,19 +517,6 @@ coleta_ipmi() {
         return 0
     fi
     IPMI_AVAILABLE=1
-    echo "Aviso: SEL sem fuso explícito usa o fuso do host; confira a configuração do BMC." >&2
-    local bmc_epoch now delta
-    bmc_epoch="$(epoch_ipmi "$IPMI_SEL_TIME")"
-    now="$(date +%s)"
-    if [[ "$bmc_epoch" =~ ^[0-9]+$ ]]; then
-        delta=$((now - bmc_epoch))
-        if (( delta >= -IPMI_CLOCK_TOLERANCE && delta <= IPMI_CLOCK_TOLERANCE )); then
-            IPMI_CLOCK_OK=1
-        fi
-    fi
-    if [[ "$IPMI_CLOCK_OK" -eq 0 ]]; then
-        echo "Aviso: relógio BMC inválido ou divergente; SEL apenas como histórico, sem diagnóstico." >&2
-    fi
     IPMI_SEL_NEAR="$(filtra_ipmi_proximo "$REF_TS" "$IPMI_SEL_LIST")"
 }
 
@@ -522,6 +550,12 @@ mostra_linha_tempo() {
     if [[ "$MODE" == "FULL" ]]; then
         if [[ "$IPMI_AVAILABLE" -eq 1 ]]; then
             echo "IPMI SEL time: ${IPMI_SEL_TIME:-indisponível}"
+            if [[ -n "$IPMI_HOST_TIME" ]]; then
+                echo "Horário do host na consulta BMC: $IPMI_HOST_TIME"
+            fi
+            if [[ -n "$IPMI_CLOCK_DELTA" ]]; then
+                echo "Diferença host - BMC: ${IPMI_CLOCK_DELTA}s (positivo = BMC atrasado)"
+            fi
             if [[ -n "$IPMI_SEL_NEAR" ]]; then
                 echo "Eventos IPMI próximos à referência (limitados ao início do boot atual):"
                 echo "$IPMI_SEL_NEAR"

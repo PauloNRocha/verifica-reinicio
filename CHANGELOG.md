@@ -2,6 +2,14 @@
 
 As datas seguem o histórico Git quando existe commit correspondente. Uma entrada neste arquivo não implica tag ou release publicada. As versões 1.0.0 e 1.2.2 têm observações específicas abaixo para não atribuir ao histórico versões que não foram publicadas separadamente.
 
+## 1.3.1 — 2026-09-22
+
+- Aceita datas IPMI `MM/DD/YY`, além de `MM/DD/YYYY`, com e sem AM/PM.
+- Distingue falha de interpretação e divergência de relógio, mostrando hora do host e diferença host/BMC em segundos.
+- Compara relógios antes da consulta SEL e só avisa sobre fuso ausente quando o horário realmente não informa fuso.
+- Mantém SEL com relógio divergente como histórico; não desloca eventos automaticamente para encaixá-los no reboot.
+- Adiciona regressões para o formato SEL com ano curto, anos-limite, atraso/adiantamento e correlação temporal.
+
 ## 1.3.0 — 2026-09-21
 
 Correções da implementação Bash. Migração para Python reservada para uma versão posterior.

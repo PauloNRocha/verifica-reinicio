@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cenários sintéticos. Não consulta journal/IPMI real nem carrega módulos.
+# Cenários sintéticos com hostnames, sensores e identificadores fictícios. Não consulta journal/IPMI real nem carrega módulos.
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../verifica-reinicio.sh
@@ -28,9 +28,9 @@ analyze() {
     result="$(cat "$work/result")"
 }
 end='2026-02-04T12:21:20.500000-03:00'
-log="$end host-lab pvedaemon[2062]: successful auth"
-acpi='2026-02-04T12:21:20.400000-03:00 host-lab systemd-logind[800]: Power key pressed short'
-shutdown="$end host-lab systemd-shutdown[1]: Powering off."
+log="$end host-exemplo pvedaemon[2062]: successful auth"
+acpi='2026-02-04T12:21:20.400000-03:00 host-exemplo systemd-logind[800]: Power key pressed short'
+shutdown="$end host-exemplo systemd-shutdown[1]: Powering off."
 assert_eq "$(extrai_shutdown_ts "$shutdown")" "$end" 'timestamp sem hostname e com microssegundos'
 analyze "$log" '' '' ''
 assert_eq "$EXIT_CODE" 2 'abrupto sem causa continua inconclusivo'
@@ -39,11 +39,11 @@ assert_eq "$EXIT_CODE" 2 'sem registros'
 analyze "$log" '' 'Dec 29 kernel: Kernel panic - old' ''
 assert_eq "$EXIT_CODE" 2 'panic histórico não determina reboot'
 assert_has "$result" 'Indícios históricos' 'histórico identificado'
-analyze "$log" '' '' '1397 | 02/04/2026 | 12:21:00 | Power Supply #0x62 | Power Supply AC lost | Deasserted'
+analyze "$log" '' '' '0004 | 02/04/2026 | 12:21:00 | Power Supply #0x01 | Power Supply AC lost | Deasserted'
 assert_eq "$EXIT_CODE" 2 'recuperação IPMI não é perda ativa'
-analyze "$log" '' '' '1397 | 02/04/2026 | 12:21:00 | Power Supply #0x62 | Fully Redundant | Asserted'
+analyze "$log" '' '' '0004 | 02/04/2026 | 12:21:00 | Power Supply #0x01 | Fully Redundant | Asserted'
 assert_eq "$EXIT_CODE" 2 'redundância normal não é falha'
-sel='1396 | 02/04/2026 | 12:28:24 PM -03 | Power Supply #0x62 | Power Supply AC lost | Asserted'
+sel='0003 | 02/04/2026 | 12:28:24 PM -03 | Power Supply #0x01 | Power Supply AC lost | Asserted'
 analyze "$acpi" '' '' "$sel"
 assert_eq "$EXIT_CODE" 0 'energia correlacionada com ACPI'
 assert_has "$result" 'Causa provável: Perda/instabilidade' 'classificação elétrica'
@@ -53,29 +53,29 @@ assert_eq "$EXIT_CODE" 0 'mecanismo ACPI registrado'
 analyze "$shutdown" '' '' ''
 assert_eq "$EXIT_CODE" 0 'sequência final registrada'
 for msg in 'NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.' 'Out of memory: Killed process 12 (java)' 'Memory cgroup out of memory' 'BUG: soft lockup - CPU#1' 'segfault at 0' 'Oops: 0000' 'hung_task: blocked'; do
-    analyze "$log" "$end host-lab kernel: $msg" '' ''
+    analyze "$log" "$end host-exemplo kernel: $msg" '' ''
     assert_eq "$EXIT_CODE" 2 "evento isolado: $msg"
 done
-analyze "$log" "$end host-lab kernel: Kernel panic - not syncing" '' ''
+analyze "$log" "$end host-exemplo kernel: Kernel panic - not syncing" '' ''
 assert_eq "$EXIT_CODE" 0 'panic explícito'
 for msg in 'Started unattended-upgrades.service - Unattended Upgrades Shutdown.' 'Started apcupsd.service.' 'Power Supply fully redundant'; do
-    analyze "$end host-lab systemd[1]: $msg" '' '' ''
+    analyze "$end host-exemplo systemd[1]: $msg" '' '' ''
     assert_eq "$EXIT_CODE" 2 "mensagem normal: $msg"
 done
-analyze "$shutdown"$'\n'"$end host-lab systemd[1]: Started unattended-upgrades.service - Unattended Upgrades Shutdown." '' '' ''
+analyze "$shutdown"$'\n'"$end host-exemplo systemd[1]: Started unattended-upgrades.service - Unattended Upgrades Shutdown." '' '' ''
 if grep -qi 'causado por atualização' <<< "$result"; then exit 1; fi
 checks=$((checks + 1))
 IPMI_CLOCK_OK=1
 CURRENT_BOOT_EPOCH="$(date -d '2026-02-04T12:29:45-03:00' +%s)"
 near="$(filtra_ipmi_proximo "$end" "$sel")"
-assert_eq "$near" "$sel" 'caso host-lab: último log 12:21 e SEL 12:28'
-old='1394 | 02/03/2026 | 09:00:16 PM -03 | Power Supply #0x62 | Power Supply AC lost | Asserted'
-after='1398 | 02/04/2026 | 12:30:00 PM -03 | Power Supply #0x62 | Power Supply AC lost | Asserted'
+assert_eq "$near" "$sel" 'caso host-exemplo: último log 12:21 e SEL 12:28'
+old='0001 | 02/03/2026 | 09:00:16 PM -03 | Power Supply #0x01 | Power Supply AC lost | Asserted'
+after='0005 | 02/04/2026 | 12:30:00 PM -03 | Power Supply #0x01 | Power Supply AC lost | Asserted'
 assert_eq "$(filtra_ipmi_proximo "$end" "$old"$'\n'"$after")" '' 'exclui eventos antigos e posteriores ao boot'
 IPMI_CLOCK_OK=0
 assert_eq "$(filtra_ipmi_proximo "$end" "$sel")" '' 'relógio não validado impede correlação'
 # Grande volume de evidências não deve causar SIGPIPE.
-large="$(awk 'BEGIN {for(i=0;i<20000;i++) print "2026-02-04T12:21:20-03:00 host-lab kernel: Kernel panic - not syncing"}')"
+large="$(awk 'BEGIN {for(i=0;i<20000;i++) print "2026-02-04T12:21:20-03:00 host-exemplo kernel: Kernel panic - not syncing"}')"
 analyze "$log" "$large" '' ''
 assert_eq "$EXIT_CODE" 0 'muitas evidências não interrompem análise'
 # Coleta simulada: horário fracionário precisa chegar intacto a --until.
@@ -165,7 +165,7 @@ journalctl() {
     if [[ "$1" == '--list-boots' ]]; then
         printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
     else
-        printf '%s\n' '1770218480.500000 host-lab kernel: last record'
+        printf '%s\n' '1770218480.500000 host-exemplo kernel: last record'
     fi
 }
 prepara_journal
@@ -250,26 +250,26 @@ assert_eq "$IPMI_SEL_NEAR" '' 'não classifica SEL com relógio divergente'
 unset -f ipmitool modprobe timeout
 # Regressão do FULL no Ubuntu: mensagens normais não são indícios.
 noise="$(cat <<'LOG'
-2026-09-21T08:54:35-03:00 ubuntu gdm-x-session[2269]: Adding input device Power Button (/dev/input/event1)
-2026-09-21T08:54:35-03:00 ubuntu gdm-x-session[2269]: Power Button: Applying InputClass libinput keyboard catchall
-2026-09-21T08:54:35-03:00 ubuntu gdm-x-session[2269]: Power Button: always reports core events
-2026-09-21T08:54:35-03:00 ubuntu gdm-x-session[2269]: event1 - Power Button: device removed
-2026-09-18T12:32:09-03:00 ubuntu systemd[1]: anacron.service skipped (ConditionACPower=true).
-2026-09-18T12:46:25-03:00 ubuntu systemd[1]: Stopping cups-browsed.service - Make remote CUPS printers available locally...
-2026-09-19T09:47:48-03:00 ubuntu kernel: ftrace: allocated 228 pages with 4 groups
-2026-09-19T09:47:48-03:00 ubuntu kernel: CPU0: Thermal monitoring enabled (TM1)
-2026-09-19T09:47:48-03:00 ubuntu kernel: thermal_sys: Registered thermal governor power_allocator
-2026-09-19T09:47:48-03:00 ubuntu kernel: ACPI: New power resource
-2026-09-19T09:47:48-03:00 ubuntu kernel: thermal thermal_zone10: failed to read out thermal zone (-61)
-2026-09-19T09:47:48-03:00 ubuntu systemd[1]: Reached target nss-lookup.target - Host and Network Name Lookups.
-2026-09-19T09:47:48-03:00 ubuntu systemd[1]: Starting thermald.service - Thermal Daemon Service...
-2026-09-19T09:47:48-03:00 ubuntu systemd[1]: Starting power-profiles-daemon.service - Power Profiles daemon...
-2026-09-19T09:47:48-03:00 ubuntu kernel: NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.
+2026-09-21T08:54:35-03:00 host-exemplo gdm-x-session[2269]: Adding input device Power Button (/dev/input/event1)
+2026-09-21T08:54:35-03:00 host-exemplo gdm-x-session[2269]: Power Button: Applying InputClass libinput keyboard catchall
+2026-09-21T08:54:35-03:00 host-exemplo gdm-x-session[2269]: Power Button: always reports core events
+2026-09-21T08:54:35-03:00 host-exemplo gdm-x-session[2269]: event1 - Power Button: device removed
+2026-09-18T12:32:09-03:00 host-exemplo systemd[1]: anacron.service skipped (ConditionACPower=true).
+2026-09-18T12:46:25-03:00 host-exemplo systemd[1]: Stopping cups-browsed.service - Make remote CUPS printers available locally...
+2026-09-19T09:47:48-03:00 host-exemplo kernel: ftrace: allocated 228 pages with 4 groups
+2026-09-19T09:47:48-03:00 host-exemplo kernel: CPU0: Thermal monitoring enabled (TM1)
+2026-09-19T09:47:48-03:00 host-exemplo kernel: thermal_sys: Registered thermal governor power_allocator
+2026-09-19T09:47:48-03:00 host-exemplo kernel: ACPI: New power resource
+2026-09-19T09:47:48-03:00 host-exemplo kernel: thermal thermal_zone10: failed to read out thermal zone (-61)
+2026-09-19T09:47:48-03:00 host-exemplo systemd[1]: Reached target nss-lookup.target - Host and Network Name Lookups.
+2026-09-19T09:47:48-03:00 host-exemplo systemd[1]: Starting thermald.service - Thermal Daemon Service...
+2026-09-19T09:47:48-03:00 host-exemplo systemd[1]: Starting power-profiles-daemon.service - Power Profiles daemon...
+2026-09-19T09:47:48-03:00 host-exemplo kernel: NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.
 LOG
 )"
 assert_eq "$(filtra_indicios "$noise")" '' 'ignora mensagens normais fornecidas pelo usuário'
 for event in 'Kernel panic - not syncing' 'BUG: soft lockup - CPU#1 stuck for 26s' 'NMI watchdog: Watchdog detected hard LOCKUP' 'Out of memory: Killed process 123 (java)' 'critical temperature reached (100 C), shutting down' 'I/O error, dev sda' 'Hardware Error: Machine Check Exception' 'segfault at 0' 'Power failure detected' 'Power Supply AC lost' 'UPS on battery'; do
-    event_line="2026-09-21T08:54:35-03:00 ubuntu kernel: $event"
+    event_line="2026-09-21T08:54:35-03:00 host-exemplo kernel: $event"
     assert_eq "$(filtra_indicios "$noise"$'\n'"$event_line")" "$event_line" "preserva evento: $event"
 done
 assert_eq "$(filtra_indicios "$acpi")" "$acpi" 'preserva logind Power key realmente pressionada'
@@ -303,8 +303,38 @@ if command -v gzip >/dev/null 2>&1; then
     history="$(coleta_logs_aux "$work/logs" 2> "$work/aux-warnings")"
     assert_has "$history" 'syslog.1.gz' 'arquivo comprimido aparece se contém ocorrência'
 fi
-touchpad='2026-09-21T09:36:11.709643-03:00 ubuntu /usr/libexec/gdm-x-session[4769]: (EE) event4 - ELAN Touchpad: kernel bug: Touch jump detected and discarded.'
+touchpad='2026-09-21T09:36:11.709643-03:00 host-exemplo /usr/libexec/gdm-x-session[4769]: (EE) event4 - Example Touchpad: kernel bug: Touch jump detected and discarded.'
 assert_eq "$(filtra_indicios "$touchpad")" '' 'libinput não é BUG emitido pelo kernel'
-kernel_bug='2026-09-21T09:36:11-03:00 ubuntu kernel: BUG: unable to handle page fault'
+kernel_bug='2026-09-21T09:36:11-03:00 host-exemplo kernel: BUG: unable to handle page fault'
 assert_eq "$(filtra_indicios "$kernel_bug")" "$kernel_bug" 'mantém BUG emitido pelo kernel'
+# Regressão host-exemplo: SEL MM/DD/YY e diferença de relógio explícita.
+assert_eq "$(epoch_ipmi '01/15/26 09:00:00 -03')" "$(date -d '2026-01-15T09:00:00-03:00' +%s)" 'ano curto e offset'
+assert_eq "$(epoch_ipmi '01/15/26 09:00:00 AM -03')" "$(epoch_ipmi '01/15/2026 09:00:00 AM -03')" 'ano curto AM/PM'
+assert_eq "$(epoch_ipmi '01/01/68 00:00:00 UTC')" "$(date -d '2068-01-01T00:00:00Z' +%s)" 'limite superior século 2000'
+assert_eq "$(epoch_ipmi '01/01/69 00:00:00 UTC')" "$(date -d '1969-01-01T00:00:00Z' +%s)" 'limite inferior século 1900'
+assert_eq "$(epoch_ipmi '02/30/26 09:00:00 -03')" '' 'ano curto não aceita data inválida'
+assert_eq "$(epoch_ipmi '01/15/026 09:00:00 -03')" '' 'rejeita ano de três dígitos'
+host_epoch="$(date -d '2026-01-15T12:00:00-03:00' +%s)"
+valida_relogio_ipmi '01/15/26 09:00:00 -03' "$host_epoch" 2> "$work/clock"
+assert_eq "$IPMI_CLOCK_OK" 0 'três horas de atraso impedem correlação'
+assert_eq "$IPMI_CLOCK_DELTA" 10800 'diferença em segundos'
+assert_has "$(cat "$work/clock")" 'atrasado 10800 segundos' 'aviso de divergência, não de parse'
+if grep -q 'sem fuso explícito' "$work/clock"; then exit 1; fi
+checks=$((checks + 1))
+valida_relogio_ipmi '01/15/26 12:00:00 -03' "$host_epoch" 2> "$work/clock"
+assert_eq "$IPMI_CLOCK_OK" 1 'ano curto sincronizado permite correlação'
+assert_eq "$IPMI_CLOCK_DELTA" 0 'relógios sincronizados'
+valida_relogio_ipmi '01/15/26 15:00:00 -03' "$host_epoch" 2> "$work/clock"
+assert_has "$(cat "$work/clock")" 'adiantado 10800 segundos' 'direção da diferença'
+valida_relogio_ipmi 'data inválida' "$host_epoch" 2> "$work/clock"
+assert_eq "$IPMI_CLOCK_DELTA" '' 'parse inválido não fabrica diferença'
+assert_has "$(cat "$work/clock")" 'não interpretável' 'aviso específico de parse'
+valida_relogio_ipmi '01/15/26 12:00:00' "$host_epoch" 2> "$work/clock"
+assert_has "$(cat "$work/clock")" 'sem fuso explícito' 'aviso apenas se falta offset'
+IPMI_CLOCK_OK=1
+CURRENT_BOOT_EPOCH="$(date -d '2026-01-15T11:00:00-03:00' +%s)"
+short_sel='0002 | 01/15/26 | 10:58:00 -03 | Power Supply #0x01 | Power Supply AC lost | Asserted'
+assert_eq "$(filtra_ipmi_proximo '2026-01-15T10:55:00.500000-03:00' "$short_sel")" "$short_sel" 'correlação SEL ano curto'
+old_sel='0001 | 01/15/26 | 09:30:00 -03 | Power Supply #0x01 | Power Supply AC lost | Asserted'
+assert_eq "$(filtra_ipmi_proximo '2026-01-15T10:55:00.500000-03:00' "$old_sel")" '' 'evento sintético fora da janela não está na janela'
 printf 'OK: %s verificações com dados sintéticos.\n' "$checks"
