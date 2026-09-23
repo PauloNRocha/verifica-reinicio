@@ -2,6 +2,12 @@
 
 As datas seguem o histórico Git quando existe commit correspondente. Uma entrada neste arquivo não implica tag ou release publicada. As versões 1.0.0 e 1.2.2 têm observações específicas abaixo para não atribuir ao histórico versões que não foram publicadas separadamente.
 
+## 1.3.2 — 2026-09-23
+
+- Restaura o aviso "Reinício possivelmente abrupto" quando o boot anterior termina sem sequência de shutdown, sem tratar hipótese como causa comprovada (`exit 2`).
+- Destaca eventos de perda AC no SEL com relógio divergente como indício histórico; não desloca timestamps nem classifica automaticamente o reboot como falha elétrica.
+- Acrescenta regressões para boot abrupto, ausência de journal, relógio divergente e evento elétrico correlacionado.
+
 ## 1.3.1 — 2026-09-22
 
 - Aceita datas IPMI `MM/DD/YY`, além de `MM/DD/YYYY`, com e sem AM/PM.

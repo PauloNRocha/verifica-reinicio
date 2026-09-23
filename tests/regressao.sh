@@ -34,13 +34,36 @@ shutdown="$end host-exemplo systemd-shutdown[1]: Powering off."
 assert_eq "$(extrai_shutdown_ts "$shutdown")" "$end" 'timestamp sem hostname e com microssegundos'
 analyze "$log" '' '' ''
 assert_eq "$EXIT_CODE" 2 'abrupto sem causa continua inconclusivo'
+assert_has "$result" 'Reinício possivelmente abrupto' 'restaura sinal observado na 1.2.4'
+assert_has "$result" 'causa não determinada' 'abrupto não confirma energia'
 analyze '' '' '' ''
 assert_eq "$EXIT_CODE" 2 'sem registros'
+if grep -Fq 'Reinício possivelmente abrupto' <<< "$result"; then
+    echo 'FALHOU: não há base para inferir abrupto sem journal' >&2
+    exit 1
+fi
+checks=$((checks + 1))
 analyze "$log" '' 'Dec 29 kernel: Kernel panic - old' ''
 assert_eq "$EXIT_CODE" 2 'panic histórico não determina reboot'
 assert_has "$result" 'Indícios históricos' 'histórico identificado'
 analyze "$log" '' '' '0004 | 02/04/2026 | 12:21:00 | Power Supply #0x01 | Power Supply AC lost | Deasserted'
 assert_eq "$EXIT_CODE" 2 'recuperação IPMI não é perda ativa'
+MODE=FULL
+IPMI_CLOCK_OK=0
+IPMI_SEL_LIST='0006 | 02/04/2026 | 11:00:00 -03 | Power Supply #0x01 | Power Supply AC lost | Asserted'
+analyze "$log" '' '' ''
+assert_eq "$EXIT_CODE" 2 'divergência BMC não transforma indício em causa'
+assert_has "$result" 'Reinício possivelmente abrupto' 'abrupto mantém destaque no FULL'
+assert_has "$result" 'Indício elétrico:' 'SEL com relógio divergente é indício'
+IPMI_SEL_LIST='0007 | 02/04/2026 | 11:00:00 -03 | Power Supply #0x01 | Power Supply AC lost | Deasserted'
+analyze "$log" '' '' ''
+if grep -Fq 'Indício elétrico:' <<< "$result"; then
+    echo 'FALHOU: apenas Deasserted não estabelece perda AC' >&2
+    exit 1
+fi
+checks=$((checks + 1))
+IPMI_SEL_LIST=''
+MODE=FAST
 analyze "$log" '' '' '0004 | 02/04/2026 | 12:21:00 | Power Supply #0x01 | Fully Redundant | Asserted'
 assert_eq "$EXIT_CODE" 2 'redundância normal não é falha'
 sel='0003 | 02/04/2026 | 12:28:24 PM -03 | Power Supply #0x01 | Power Supply AC lost | Asserted'

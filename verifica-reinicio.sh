@@ -39,8 +39,8 @@ MODE="FAST"
 SAVE=0
 SAVE_FILE=""
 
-SCRIPT_VERSION="1.3.1"
-SCRIPT_DATE="2026-09-22"
+SCRIPT_VERSION="1.3.2"
+SCRIPT_DATE="2026-09-23"
 
 FAST_LIMIT=1500
 FULL_LIMIT=8000
@@ -374,9 +374,17 @@ analisa_reinicio() {
         if [[ -n "$shutdown" ]]; then
             echo "Há início de desligamento, mas não há evidência suficiente de conclusão ou causa."
         elif [[ -n "$journal" ]]; then
-            echo "Sem sequência de desligamento na amostra: interrupção abrupta ou logs incompletos são possíveis."
+            echo "Reinício possivelmente abrupto: não há sequência normal de shutdown no boot anterior."
+            echo "Travamento, reset físico, perda de energia ou logs incompletos são possíveis; causa não determinada."
         else
             echo "Sem registros utilizáveis do boot anterior para determinar a causa."
+        fi
+        if [[ "$MODE" == "FULL" && "$IPMI_CLOCK_OK" -eq 0 && -n "$IPMI_SEL_LIST" ]]; then
+            local ipmi_historico
+            ipmi_historico="$(awk -F'|' 'tolower($5) ~ /ac lost/ && tolower($NF) ~ /^[[:space:]]*asserted[[:space:]]*$/ {print; exit}' <<< "$IPMI_SEL_LIST")"
+            if [[ -n "$ipmi_historico" ]]; then
+                echo "Indício elétrico: o SEL registra perda de entrada AC, mas o relógio BMC divergente impede vincular o evento a este reboot."
+            fi
         fi
     fi
     if [[ -n "$power" ]]; then

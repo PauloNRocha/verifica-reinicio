@@ -2,7 +2,7 @@
 
 Ferramenta Bash para investigar o último reinício ou desligamento de um servidor Linux. Reúne registros do journal, identifica evidências e, no modo FULL, consulta logs históricos e o SEL do IPMI.
 
-**Versão:** 1.3.1 — 22 de setembro de 2026
+**Versão:** 1.3.2 — 23 de setembro de 2026
 
 O foco é Debian 12/13, Ubuntu e hosts Proxmox VE com systemd. A ferramenta não comprova automaticamente a causa de todo reinício: ausência de logs, retenção, relógios divergentes e falhas de hardware podem impedir uma conclusão.
 
@@ -14,7 +14,8 @@ O foco é Debian 12/13, Ubuntu e hosts Proxmox VE com systemd. A ferramenta não
 | Causa provável: energia | O SEL contém uma falha elétrica `Asserted` próxima da referência temporal, com relógio BMC compatível. Não prova que todas as fontes perderam energia. |
 | Mecanismo registrado: ACPI/Power key | O logind registrou o evento ou solicitação de desligamento. Não identifica ação humana, UPS ou glitch elétrico. |
 | Sequência de reinício/desligamento registrada | Há mensagem final explícita do kernel/systemd; a origem da solicitação pode permanecer desconhecida. |
-| Motivo não conclusivo | As evidências disponíveis não permitem classificar o evento com segurança. |
+| Reinício possivelmente abrupto; motivo não conclusivo | Há registros do boot anterior, mas não há sequência normal de shutdown nem evidência causal suficiente. O resultado continua sendo `2`. |
+| Motivo não conclusivo | Não há dados utilizáveis ou os disponíveis não permitem classificar o evento com segurança. |
 
 OOM, segfault, Oops, lockup, erros de disco e mensagens térmicas isoladas são apresentados como **indícios**. A ocorrência desses eventos não demonstra, por si só, que provocaram o reboot. A ativação normal do NMI watchdog e a inicialização de `unattended-upgrades` não são consideradas causas.
 
@@ -117,7 +118,7 @@ Para usar o SEL na classificação:
 
 Datas SEL com ano de dois ou quatro dígitos, AM/PM e offset são normalizadas antes da comparação. Anos `00..68` representam `2000..2068`; `69..99`, `1969..1999`, conforme a convenção do GNU date. O relatório diferencia formato inválido de relógio divergente, mostra a hora do host na consulta e a diferença em segundos. Relógios históricos não são deslocados automaticamente. Quando o BMC não informa fuso, assume-se o fuso local; confira essa configuração. A comparação com o relógio atual não garante que o BMC estava sincronizado na data do incidente.
 
-Se o IPMI estiver ausente, falhar ou expirar, a análise continua com as outras fontes. Saída SEL parcial de uma consulta que falhou é descartada. Sem correlação confiável, os eventos são apenas históricos.
+Se o IPMI estiver ausente, falhar ou expirar, a análise continua com as outras fontes. Saída SEL parcial de uma consulta que falhou é descartada. Sem correlação confiável, os eventos são apenas históricos. Se houver uma perda de entrada AC registrada e não houver shutdown no journal, o FULL destaca isso como indício, sem deslocar horários ou atribuir causa automaticamente.
 
 ## Códigos de saída
 
