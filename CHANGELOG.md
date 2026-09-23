@@ -2,6 +2,13 @@
 
 As datas seguem o histórico Git quando existe commit correspondente. Uma entrada neste arquivo não implica tag ou release publicada. As versões 1.0.0 e 1.2.2 têm observações específicas abaixo para não atribuir ao histórico versões que não foram publicadas separadamente.
 
+## 1.3.3 — 2026-09-23
+
+- Destaca resultado e grau de certeza: vermelho para reinício possivelmente abrupto ou panic, amarelo para causa incerta e indício elétrico, ciano para ACPI e verde para sequência registrada.
+- Coloca o aviso de reinício abrupto antes da explicação e a análise antes do histórico detalhado de boots, para leitura rápida.
+- Mantém saída sem ANSI em pipes e respeita `NO_COLOR`.
+- Adiciona testes para cores e ausência de sequências ANSI em saída redirecionada.
+
 ## 1.3.2 — 2026-09-23
 
 - Restaura o aviso "Reinício possivelmente abrupto" quando o boot anterior termina sem sequência de shutdown, sem tratar hipótese como causa comprovada (`exit 2`).

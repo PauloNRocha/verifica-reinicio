@@ -2,7 +2,7 @@
 
 Ferramenta Bash para investigar o último reinício ou desligamento de um servidor Linux. Reúne registros do journal, identifica evidências e, no modo FULL, consulta logs históricos e o SEL do IPMI.
 
-**Versão:** 1.3.2 — 23 de setembro de 2026
+**Versão:** 1.3.3 — 23 de setembro de 2026
 
 O foco é Debian 12/13, Ubuntu e hosts Proxmox VE com systemd. A ferramenta não comprova automaticamente a causa de todo reinício: ausência de logs, retenção, relógios divergentes e falhas de hardware podem impedir uma conclusão.
 
@@ -83,7 +83,7 @@ O arquivo inclui hostname, data, hora e sufixo aleatório:
 
 `HOST` e `XXXXXX` representam, respectivamente, o hostname sanitizado e o sufixo gerado por `mktemp`. O arquivo é criado com permissão `600`. Se a criação segura falhar, a execução termina com erro. O script aguarda o gravador antes de confirmar a gravação.
 
-O relatório pode conter IPs, usuários, nomes de máquinas e mensagens de aplicações. Revise o conteúdo antes de compartilhar. `/tmp` não é armazenamento permanente; preserve o relatório no local usado pela sua equipe para incidentes.
+A análise aparece antes do histórico detalhado de boots, para leitura rápida. A saída usa cores quando conectada a um terminal, respeita `NO_COLOR` e permanece sem ANSI em pipes. Com `--save` no terminal, o relatório também pode conter códigos ANSI. O relatório pode conter IPs, usuários, nomes de máquinas e mensagens de aplicações. Revise o conteúdo antes de compartilhar. `/tmp` não é armazenamento permanente; preserve o relatório no local usado pela sua equipe para incidentes.
 
 ## Janela temporal e limites
 

@@ -35,7 +35,22 @@ assert_eq "$(extrai_shutdown_ts "$shutdown")" "$end" 'timestamp sem hostname e c
 analyze "$log" '' '' ''
 assert_eq "$EXIT_CODE" 2 'abrupto sem causa continua inconclusivo'
 assert_has "$result" 'Reinício possivelmente abrupto' 'restaura sinal observado na 1.2.4'
-assert_has "$result" 'causa não determinada' 'abrupto não confirma energia'
+assert_has "$result" 'Causa não determinada.' 'abrupto não confirma energia'
+# A mensagem principal deve se destacar no terminal e continuar limpa em pipes.
+C_RED=$'\e[31m'
+C_YELLOW=$'\e[33m'
+C_BOLD=$'\e[1m'
+C_RESET=$'\e[0m'
+analyze "$log" '' '' ''
+assert_has "$result" $'\e[1m\e[31mReinício possivelmente abrupto:' 'alerta vermelho no terminal'
+assert_has "$result" $'\e[1m\e[33mCausa não determinada.' 'incerteza amarela no terminal'
+init_colors
+analyze "$log" '' '' ''
+if [[ "$result" == *$'\e['* ]]; then
+    echo 'FALHOU: ANSI em saída sem TTY' >&2
+    exit 1
+fi
+checks=$((checks + 1))
 analyze '' '' '' ''
 assert_eq "$EXIT_CODE" 2 'sem registros'
 if grep -Fq 'Reinício possivelmente abrupto' <<< "$result"; then
@@ -55,6 +70,12 @@ analyze "$log" '' '' ''
 assert_eq "$EXIT_CODE" 2 'divergência BMC não transforma indício em causa'
 assert_has "$result" 'Reinício possivelmente abrupto' 'abrupto mantém destaque no FULL'
 assert_has "$result" 'Indício elétrico:' 'SEL com relógio divergente é indício'
+C_YELLOW=$'\e[33m'
+C_BOLD=$'\e[1m'
+C_RESET=$'\e[0m'
+analyze "$log" '' '' ''
+assert_has "$result" $'\e[1m\e[33mIndício elétrico:' 'indício destacado sem apresentar como causa'
+init_colors
 IPMI_SEL_LIST='0007 | 02/04/2026 | 11:00:00 -03 | Power Supply #0x01 | Power Supply AC lost | Deasserted'
 analyze "$log" '' '' ''
 if grep -Fq 'Indício elétrico:' <<< "$result"; then
@@ -138,6 +159,25 @@ assert_eq "$status" 1 'argumento inválido'
     main --fast
 ) > "$work/fast" 2>&1 && status=0 || status=$?
 assert_eq "$status" 2 'FAST isolado termina inconclusivo sem consultas FULL'
+# A causa deve aparecer antes do histórico de boots, que pode ocupar várias telas.
+(
+    requer_root() { :; }
+    prepara_journal() { :; }
+    mostra_info_sistema() { :; }
+    mostra_boot_overview() { echo 'HISTORICO_DE_BOOTS'; }
+    verifica_crash_dumps() { :; }
+    coleta_journal_boot_anterior() { printf '%s\n' "$log"; }
+    coleta_journal_kernel_boot_anterior() { :; }
+    coleta_logs_aux() { :; }
+    coleta_ipmi() { :; }
+    main --full
+) > "$work/ordem" 2>&1 && status=0 || status=$?
+assert_eq "$status" 2 'ordem de saída mantém código inconclusivo'
+if ! awk '/Reinício possivelmente abrupto:/ {resultado=NR} /HISTORICO_DE_BOOTS/ {historico=NR} END {exit !(resultado > 0 && historico > resultado)}' "$work/ordem"; then
+    echo 'FALHOU: histórico de boots apareceu antes do resultado' >&2
+    exit 1
+fi
+checks=$((checks + 1))
 # Salvamento real apenas de texto sintético, em arquivo privado temporário.
 (
     SAVE=1

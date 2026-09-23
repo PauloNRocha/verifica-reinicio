@@ -22,13 +22,13 @@ set -euo pipefail
 # =========================[ CORES ]=======================================
 
 init_colors() {
-    if [[ -t 1 ]]; then
+    if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
         C_RESET=$'\e[0m';  C_BOLD=$'\e[1m'
-        C_RED=$'\e[31m';   C_GREEN=$'\e[32m'
+        C_RED=$'\e[31m';   C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'
         C_BLUE=$'\e[34m';  C_MAGENTA=$'\e[35m'; C_CYAN=$'\e[36m'
     else
         C_RESET=""; C_BOLD=""
-        C_RED="";   C_GREEN=""
+        C_RED="";   C_GREEN=""; C_YELLOW=""
         C_BLUE="";  C_MAGENTA=""; C_CYAN=""
     fi
 }
@@ -39,7 +39,7 @@ MODE="FAST"
 SAVE=0
 SAVE_FILE=""
 
-SCRIPT_VERSION="1.3.2"
+SCRIPT_VERSION="1.3.3"
 SCRIPT_DATE="2026-09-23"
 
 FAST_LIMIT=1500
@@ -348,7 +348,7 @@ analisa_reinicio() {
     echo -e "${C_BOLD}${C_GREEN}=========== ANÁLISE DO MOTIVO DO REINÍCIO ==========${C_RESET}"
     local result=2
     if [[ -n "$panic" ]]; then
-        echo "Evidência forte: Kernel panic / travamento."
+        echo -e "${C_BOLD}${C_RED}Evidência forte: Kernel panic / travamento.${C_RESET}"
         printf '%s\n' "$panic"
         result=0
         if [[ -n "$ipmi_power" ]]; then
@@ -356,34 +356,33 @@ analisa_reinicio() {
             printf '%s\n' "$ipmi_power"
         fi
     elif [[ -n "$ipmi_power" ]]; then
-        echo "Causa provável: Perda/instabilidade de energia (rede elétrica/UPS/PSU)."
+        echo -e "${C_BOLD}${C_YELLOW}Causa provável: Perda/instabilidade de energia (rede elétrica/UPS/PSU).${C_RESET}"
         echo "Falha elétrica ativa registrada perto do fim do boot; não comprova perda de todas as fontes."
         printf '%s\n' "$ipmi_power"
         result=0
     elif [[ -n "$acpi" ]]; then
-        echo "Mecanismo registrado: Shutdown via ACPI/Power key (possível glitch elétrico, UPS, ou botão)."
+        echo -e "${C_BOLD}${C_CYAN}Mecanismo registrado: Shutdown via ACPI/Power key (possível glitch elétrico, UPS, ou botão).${C_RESET}"
         echo "O registro não identifica ação humana nem confirma a causa elétrica."
         printf '%s\n' "$acpi"
         result=0
     elif [[ -n "$reboot" ]]; then
-        echo "Sequência de reinício/desligamento registrada; causa da solicitação não determinada."
+        echo -e "${C_BOLD}${C_GREEN}Sequência de reinício/desligamento registrada.${C_RESET} Causa da solicitação não determinada."
         printf '%s\n' "$reboot"
         result=0
     else
-        echo "Motivo não conclusivo."
         if [[ -n "$shutdown" ]]; then
-            echo "Há início de desligamento, mas não há evidência suficiente de conclusão ou causa."
+            echo -e "${C_BOLD}${C_YELLOW}Motivo não conclusivo:${C_RESET} início de desligamento sem evidência suficiente de conclusão ou causa."
         elif [[ -n "$journal" ]]; then
-            echo "Reinício possivelmente abrupto: não há sequência normal de shutdown no boot anterior."
-            echo "Travamento, reset físico, perda de energia ou logs incompletos são possíveis; causa não determinada."
+            echo -e "${C_BOLD}${C_RED}Reinício possivelmente abrupto:${C_RESET} não há sequência normal de shutdown no boot anterior."
+            echo -e "${C_BOLD}${C_YELLOW}Causa não determinada.${C_RESET} Travamento, reset físico, perda de energia ou logs incompletos são possíveis."
         else
-            echo "Sem registros utilizáveis do boot anterior para determinar a causa."
+            echo -e "${C_BOLD}${C_YELLOW}Motivo não conclusivo:${C_RESET} sem registros utilizáveis do boot anterior."
         fi
         if [[ "$MODE" == "FULL" && "$IPMI_CLOCK_OK" -eq 0 && -n "$IPMI_SEL_LIST" ]]; then
             local ipmi_historico
             ipmi_historico="$(awk -F'|' 'tolower($5) ~ /ac lost/ && tolower($NF) ~ /^[[:space:]]*asserted[[:space:]]*$/ {print; exit}' <<< "$IPMI_SEL_LIST")"
             if [[ -n "$ipmi_historico" ]]; then
-                echo "Indício elétrico: o SEL registra perda de entrada AC, mas o relógio BMC divergente impede vincular o evento a este reboot."
+                echo -e "${C_BOLD}${C_YELLOW}Indício elétrico:${C_RESET} o SEL registra perda de entrada AC; relógio BMC divergente impede vincular o evento a este reboot."
             fi
         fi
     fi
@@ -678,10 +677,6 @@ main() {
     echo
     mostra_info_sistema
     prepara_journal
-    mostra_boot_overview
-    if [[ "$MODE" == "FULL" ]]; then
-        verifica_crash_dumps
-    fi
 
     local journal="" journal_kernel="" aux=""
     if ! journal="$(coleta_journal_boot_anterior)"; then
@@ -702,6 +697,10 @@ main() {
     fi
     analisa_reinicio "$journal" "$journal_kernel" "$aux" "$IPMI_SEL_NEAR"
     mostra_linha_tempo "$SHUTDOWN_TS" "$BOOT_END_TS"
+    mostra_boot_overview
+    if [[ "$MODE" == "FULL" ]]; then
+        verifica_crash_dumps
+    fi
     mostra_trecho_journal "$journal"
     exit "$EXIT_CODE"
 }
