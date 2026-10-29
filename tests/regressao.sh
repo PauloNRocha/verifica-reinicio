@@ -5,6 +5,17 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../verifica-reinicio.sh
 source "$root/verifica-reinicio.sh"
 init_colors
+# Permite mocks de comandos em funcao sem exporta-los ao ambiente. Comandos
+# reais continuam usando env e sua normalizacao de SIGPIPE, como em producao.
+# shellcheck disable=SC2329
+env() {
+    if [[ "${1:-}" == '--default-signal=PIPE' && "$(type -t "${2:-}" || true)" == function ]]; then
+        shift
+        "$@"
+    else
+        command env "$@"
+    fi
+}
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
 checks=0
@@ -22,12 +33,22 @@ assert_has() {
     fi
     checks=$((checks + 1))
 }
+assert_lacks() {
+    if grep -Fq -- "$2" <<< "$1"; then
+        printf 'FALHOU: %s\n' "$3" >&2
+        exit 1
+    fi
+    checks=$((checks + 1))
+}
 analyze() {
     EXIT_CODE=0
-    analisa_reinicio "$1" "$2" "$3" "$4" > "$work/result"
+    # Nas unidades, o quinto argumento representa a coleta de origem confiavel.
+    analisa_reinicio "$1" "$2" "$3" "$4" "${5-$1}" > "$work/result"
     result="$(cat "$work/result")"
 }
 end='2026-02-04T12:21:20.500000-03:00'
+REF_TS="$end"
+PREVIOUS_BOOT_START_EPOCH="$(date -d '2026-02-04T10:00:00-03:00' +%s)"
 log="$end host-exemplo pvedaemon[2062]: successful auth"
 acpi='2026-02-04T12:21:20.400000-03:00 host-exemplo systemd-logind[800]: Power key pressed short'
 shutdown="$end host-exemplo systemd-shutdown[1]: Powering off."
@@ -91,11 +112,50 @@ sel='0003 | 02/04/2026 | 12:28:24 PM -03 | Power Supply #0x01 | Power Supply AC 
 analyze "$acpi" '' '' "$sel"
 assert_eq "$EXIT_CODE" 0 'energia correlacionada com ACPI'
 assert_has "$result" 'Causa provável: Perda/instabilidade' 'classificação elétrica'
-assert_has "$result" 'Sequência ACPI associada' 'preserva evidência ACPI'
+assert_has "$result" 'Evento da tecla de energia registrado' 'preserva evidência da tecla de energia'
 analyze "$acpi" '' '' ''
-assert_eq "$EXIT_CODE" 0 'mecanismo ACPI registrado'
+assert_eq "$EXIT_CODE" 2 'tecla isolada não confirma desligamento'
+assert_has "$result" 'Evento da tecla de energia registrado' 'evento explícito continua visível'
 analyze "$shutdown" '' '' ''
 assert_eq "$EXIT_CODE" 0 'sequência final registrada'
+# Solicitações genéricas não identificam tecla, terminal, menu ou falha elétrica.
+for msg in 'System is powering down.' 'Powering off...'; do
+    request_log="$end host-exemplo systemd-logind[800]: $msg"
+    analyze "$request_log" '' '' ''
+    assert_eq "$EXIT_CODE" 0 "solicitação genérica registrada: $msg"
+    assert_has "$result" 'Solicitação de desligamento registrada pelo sistema.' 'logind genérico não é ACPI'
+    assert_lacks "$result" 'Power key' 'não inventa evento da tecla de energia'
+    assert_lacks "$result" 'glitch' 'não sugere glitch sem evidência elétrica'
+    assert_lacks "$result" 'ordenado registrada' 'solicitação isolada não é sequência final'
+done
+# Sequência sintética equivalente a um poweroff pelo terminal ou menu.
+ordered_log="$request_log"$'\n'"$end host-exemplo systemd[1]: Reached target poweroff.target - System Power Off."
+ordered_log+=$'\n'"$end host-exemplo systemd[1]: Shutting down."
+ordered_log+=$'\n'"$end host-exemplo systemd-shutdown[1]: Syncing filesystems and block devices."
+ordered_log+=$'\n'"$end host-exemplo systemd-shutdown[1]: Sending SIGTERM to remaining processes..."
+ordered_log+=$'\n'"$end host-exemplo systemd-journald[100]: Journal stopped"
+for mode in FAST FULL; do
+    MODE="$mode"
+    analyze "$ordered_log" '' '' ''
+    assert_eq "$EXIT_CODE" 0 "$mode reconhece desligamento ordenado"
+    assert_has "$result" 'Sequência de reinício/desligamento ordenado registrada.' "$mode destaca a sequência registrada"
+    assert_lacks "$result" 'Power key' "$mode não atribui poweroff à tecla de energia"
+    assert_lacks "$result" 'glitch' "$mode não associa desligamento normal a falha elétrica"
+done
+MODE=FAST
+analyze "$ordered_log"$'\n'"$acpi" '' '' ''
+assert_eq "$EXIT_CODE" 0 'tecla e sequência ordenada podem coexistir'
+assert_has "$result" 'Evento da tecla de energia registrado' 'evidência da tecla é separada da sequência'
+for target in poweroff reboot halt; do
+    target_log="$end host-exemplo systemd[1]: Reached target $target.target - description."
+    analyze "$target_log" '' '' ''
+    assert_eq "$EXIT_CODE" 0 "target final reconhecido: $target"
+    assert_eq "$(extrai_shutdown_ts "$target_log")" "$end" "linha do tempo inclui $target.target"
+done
+analyze "$end host-exemplo systemd[1]: Reached target poweroff.target-extra - example." '' '' ''
+assert_eq "$EXIT_CODE" 2 'target de nome semelhante não é sequência final'
+analyze "$end host-exemplo systemd-shutdown[1]: Sending SIGTERM to remaining processes..." '' '' ''
+assert_eq "$EXIT_CODE" 2 'etapa intermediária isolada não confirma sequência final'
 for msg in 'NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.' 'Out of memory: Killed process 12 (java)' 'Memory cgroup out of memory' 'BUG: soft lockup - CPU#1' 'segfault at 0' 'Oops: 0000' 'hung_task: blocked'; do
     analyze "$log" "$end host-exemplo kernel: $msg" '' ''
     assert_eq "$EXIT_CODE" 2 "evento isolado: $msg"
@@ -129,6 +189,7 @@ PREVIOUS_BOOT_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 # Mock chamado indiretamente por timeout.
 # shellcheck disable=SC2329
 journalctl() { printf '%s\n' "$*" > "$work/args"; printf '%s\n' "$log"; }
+# shellcheck disable=SC2329
 timeout() { shift 3; "$@"; }
 coleta_journal_boot_anterior > "$work/journal"
 assert_has "$(cat "$work/args")" '--until @1770218480.500000' 'preserva fração no limite superior'
@@ -146,69 +207,44 @@ assert_eq "$status" 0 'ajuda'
 status=0
 bash "$root/verifica-reinicio.sh" --invalido > /dev/null 2>&1 || status=$?
 assert_eq "$status" 1 'argumento inválido'
-# main isolada: mocks impedem acesso a logs, hardware e modprobe.
-(
-    requer_root() { :; }
-    prepara_journal() { :; }
-    mostra_info_sistema() { :; }
-    mostra_boot_overview() { :; }
-    coleta_journal_boot_anterior() { printf '%s\n' "$log"; }
-    coleta_journal_kernel_boot_anterior() { :; }
-    coleta_logs_aux() { echo 'FAST consultou logs auxiliares' >&2; exit 99; }
-    coleta_ipmi() { echo 'FAST consultou IPMI' >&2; exit 99; }
-    main --fast
-) > "$work/fast" 2>&1 && status=0 || status=$?
+# Processos novos preservam errexit/ERR; condicionar o processo pai e seguro.
+run_case() {
+    status=0
+    bash "$root/tests/integracao.sh" "$1" "$work" > "$work/$1" 2>&1 || status=$?
+}
+run_case fast
 assert_eq "$status" 2 'FAST isolado termina inconclusivo sem consultas FULL'
-# A causa deve aparecer antes do histórico de boots, que pode ocupar várias telas.
-(
-    requer_root() { :; }
-    prepara_journal() { :; }
-    mostra_info_sistema() { :; }
-    mostra_boot_overview() { echo 'HISTORICO_DE_BOOTS'; }
-    verifica_crash_dumps() { :; }
-    coleta_journal_boot_anterior() { printf '%s\n' "$log"; }
-    coleta_journal_kernel_boot_anterior() { :; }
-    coleta_logs_aux() { :; }
-    coleta_ipmi() { :; }
-    main --full
-) > "$work/ordem" 2>&1 && status=0 || status=$?
+run_case ordem
 assert_eq "$status" 2 'ordem de saída mantém código inconclusivo'
 if ! awk '/Reinício possivelmente abrupto:/ {resultado=NR} /HISTORICO_DE_BOOTS/ {historico=NR} END {exit !(resultado > 0 && historico > resultado)}' "$work/ordem"; then
     echo 'FALHOU: histórico de boots apareceu antes do resultado' >&2
     exit 1
 fi
 checks=$((checks + 1))
-# Salvamento real apenas de texto sintético, em arquivo privado temporário.
-(
-    SAVE=1
-    HOSTNAME_SAFE=teste-regressao
-    trap finaliza EXIT
-    habilita_save
-    printf '%s\n' "$SAVE_FILE" > "$work/path"
-    printf 'relatorio sintetico\n'
-    exit 2
-) > "$work/save" 2>&1 && status=0 || status=$?
+run_case save
 assert_eq "$status" 2 'salvar preserva código inconclusivo'
 report="$(cat "$work/path")"
 assert_eq "$(stat -c %a "$report")" 600 'permissão privada'
 assert_has "$(cat "$report")" 'relatorio sintetico' 'gravação finalizada'
 rm -- "$report"
-(
-    SAVE=1
-    mktemp() { return 1; }
-    habilita_save
-) > /dev/null 2>&1 && status=0 || status=$?
+run_case mktemp
 assert_eq "$status" 3 'falha mktemp sem fallback inseguro'
-(
-    SAVE=1
-    tee() { cat > /dev/null; return 1; }
-    trap finaliza EXIT
-    habilita_save
-    printf '%s\n' "$SAVE_FILE" > "$work/path"
-    echo 'teste de falha'
-) > "$work/tee" 2>&1 && status=0 || status=$?
+run_case tee
 assert_eq "$status" 3 'falha tee é erro de execução'
 rm -- "$(cat "$work/path")"
+run_case erro-inesperado
+assert_eq "$status" 3 'ERR encerra processo independente'
+assert_lacks "$(cat "$work/erro-inesperado")" 'ERRO_IGNORADO' 'errexit nao e desativado pelo teste'
+run_case sistema-falhou
+assert_eq "$status" 3 'falha na coleta confiavel permanece erro'
+run_case env-incompativel
+assert_eq "$status" 3 'env sem suporte a sinais e erro de requisito'
+assert_has "$(cat "$work/env-incompativel")" 'GNU env' 'requisito ausente e explicado antes da coleta'
+run_case ordenado
+assert_eq "$status" 0 'main reconhece sequencia da coleta confiavel'
+run_case origem-nao-confiavel
+assert_eq "$status" 2 'main nao confia em tags ou citacoes do journal geral'
+assert_lacks "$(cat "$work/origem-nao-confiavel")" 'ordenado registrada' 'texto nao vira origem confiavel'
 # Conversões SEL: meia-noite, meio-dia, offset e formato inválido.
 assert_eq "$(epoch_ipmi '02/04/2026 12:00:00 AM -03')" "$(date -d '2026-02-04T00:00:00-03:00' +%s)" 'SEL meia-noite'
 assert_eq "$(epoch_ipmi '02/04/2026 12:00:00 PM -03')" "$(date -d '2026-02-04T12:00:00-03:00' +%s)" 'SEL meio-dia'
@@ -222,18 +258,85 @@ CURRENT_BOOT_EPOCH="$(date -d '2026-02-04T12:29:45-03:00' +%s)"
 # Prepara journal com listagem sintética, mantendo o boot atual real apenas como âncora.
 mock_current_id="$(tr -d '-' < /proc/sys/kernel/random/boot_id)"
 mock_current_id="${mock_current_id//$'\n'/}"
+# shellcheck disable=SC2329
 timeout() { shift 3; "$@"; }
 # shellcheck disable=SC2329
 journalctl() {
+    printf '%s\n' "$*" > "$work/args"
     if [[ "$1" == '--list-boots' ]]; then
         printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
     else
-        printf '%s\n' '1770218480.500000 host-exemplo kernel: last record'
+        printf '%s\n' '__REALTIME_TIMESTAMP=1770218480500000' '_SOURCE_REALTIME_TIMESTAMP=1770218480498897'
     fi
 }
 prepara_journal
 assert_eq "$BOOT_END_EPOCH" '1770218480.500000' 'referência obtida com microssegundos'
 assert_eq "$PREVIOUS_BOOT_ID" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 'fixa ID do boot'
+assert_has "$(cat "$work/args")" '-o export --output-fields=__REALTIME_TIMESTAMP' 'referência usa metadado de recebimento'
+# Um único registro no fim da janela: a origem antecede o recebimento em 1103 us.
+# A consulta antiga o excluía, embora o histórico mostrasse o boot anterior.
+# shellcheck disable=SC2329
+journalctl() {
+    if [[ "$1" == '--list-boots' ]]; then
+        printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
+    elif [[ " $* " == *' -o export '* ]]; then
+        printf '%s\n' '__REALTIME_TIMESTAMP=1770218480501103' '_SOURCE_REALTIME_TIMESTAMP=1770218480500000'
+    elif [[ " $* " == *' -o short-unix '* ]]; then
+        printf '%s\n' '1770218480.500000 host-exemplo app: last record'
+    else
+        local lower=0 upper=0 kernel_only=0
+        while (( $# )); do
+            case "$1" in
+                --since) lower="${2#@}"; lower=$((lower * 1000000)); shift ;;
+                --until) upper="${2#@}"; upper="${upper/./}"; shift ;;
+                -k) kernel_only=1 ;;
+            esac
+            shift
+        done
+        if (( ! kernel_only && lower <= 1770218480501103 && upper >= 1770218480501103 )); then
+            printf '%s\n' "$log"
+        fi
+    fi
+    return 0
+}
+assert_eq "$(journalctl --since @1770216680 --until @1770218480.500000)" '' 'limite de origem reproduz coleta vazia'
+prepara_journal
+assert_eq "$BOOT_END_EPOCH" '1770218480.501103' 'recebimento difere do horário de origem'
+for mode in FAST FULL; do
+    MODE="$mode"
+    collected="$(coleta_journal_boot_anterior)"
+    assert_eq "$collected" "$log" "$mode conserva o último registro com atraso de recebimento"
+    analyze "$collected" '' '' ''
+    assert_has "$result" 'Reinício possivelmente abrupto' "$mode não confunde filtro vazio com journal ausente"
+    assert_eq "$EXIT_CODE" 2 "$mode continua sem atribuir causa elétrica"
+    coleta_journal_kernel_boot_anterior > "$work/kernel" && status=0 || status=$?
+    assert_eq "$status" 0 "$mode aceita ausência de eventos de kernel na janela"
+    assert_eq "$(cat "$work/kernel")" '' "$mode não amplia janela para buscar kernel antigo"
+done
+# Coleta geral vazia após referência válida é erro, não ausência normal de journal.
+# shellcheck disable=SC2329
+journalctl() { :; }
+coleta_journal_boot_anterior > "$work/empty" 2> "$work/empty-error" && status=0 || status=$?
+assert_eq "$status" 3 'consulta geral inconsistente retorna erro'
+assert_has "$(cat "$work/empty-error")" 'consulta temporal do journal retornou vazia' 'aviso específico para coleta inconsistente'
+EXIT_CODE=3
+analisa_reinicio '' '' '' '' > "$work/result"
+assert_has "$(cat "$work/result")" 'Análise indisponível:' 'não declara inexistência de logs após erro'
+EXIT_CODE=0
+run_case inconsistent-main
+assert_eq "$status" 3 'main propaga inconsistência da consulta geral'
+assert_has "$(cat "$work/inconsistent-main")" 'Análise indisponível:' 'resultado distingue falha de coleta na execução completa'
+# A conversão usa aritmética inteira e conserva zeros nos microssegundos.
+# shellcheck disable=SC2329
+journalctl() {
+    if [[ "$1" == '--list-boots' ]]; then
+        printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
+    else
+        printf '%s\n' '__REALTIME_TIMESTAMP=1770218480001103'
+    fi
+}
+prepara_journal
+assert_eq "$BOOT_END_EPOCH" '1770218480.001103' 'conversão preserva zeros nos microssegundos'
 # shellcheck disable=SC2329
 journalctl() {
     if [[ "$1" == '--list-boots' ]]; then
@@ -244,7 +347,19 @@ journalctl() {
 }
 prepara_journal
 assert_eq "$BOOT_END_EPOCH" '' 'referência inválida não libera consulta sem janela'
+assert_eq "$EXIT_CODE" 3 'metadado inválido é erro de coleta'
 assert_eq "$(coleta_journal_boot_anterior)" '' 'não coleta sem referência válida'
+# Um timestamp de origem isolado nunca substitui o metadado de recebimento.
+# shellcheck disable=SC2329
+journalctl() {
+    if [[ "$1" == '--list-boots' ]]; then
+        printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
+    else
+        printf '%s\n' '_SOURCE_REALTIME_TIMESTAMP=1770218480500000'
+    fi
+}
+prepara_journal
+assert_eq "$BOOT_END_EPOCH" '' 'não usa timestamp de origem como fallback'
 unset -f journalctl timeout
 # Ausência de journalctl: não confundir com evidência de falha elétrica.
 (
@@ -261,6 +376,7 @@ unset -f journalctl timeout
 assert_has "$(cat "$work/missing")" 'journalctl não encontrado' 'degrada sem journalctl'
 # Falha no journal é distinguida de ausência de evidências.
 BOOT_END_EPOCH='1770218480.500000'
+# shellcheck disable=SC2329
 timeout() { return 124; }
 coleta_journal_boot_anterior > /dev/null 2>&1 && status=0 || status=$?
 assert_eq "$status" 3 'timeout journal retorna erro'
@@ -269,19 +385,7 @@ EXIT_CODE=3
 analisa_reinicio "$shutdown" '' '' '' > /dev/null
 assert_eq "$EXIT_CODE" 3 'evidência não oculta erro de coleta'
 # FULL sem journal ainda fornece indícios históricos, mas não confirma causa.
-(
-    requer_root() { :; }
-    prepara_journal() { :; }
-    mostra_info_sistema() { :; }
-    mostra_boot_overview() { :; }
-    verifica_crash_dumps() { :; }
-    coleta_journal_boot_anterior() { :; }
-    coleta_journal_kernel_boot_anterior() { :; }
-    coleta_logs_aux() { echo 'old kernel: Kernel panic'; }
-    coleta_ipmi() { :; }
-    EXIT_CODE=0
-    main --full
-) > "$work/full" 2>&1 && status=0 || status=$?
+run_case full
 assert_eq "$status" 2 'FULL só histórico permanece inconclusivo'
 assert_has "$(cat "$work/full")" 'old kernel: Kernel panic' 'FULL mantém histórico visível'
 # Falhas opcionais do BMC: simula timeout e relógio divergente.
@@ -396,8 +500,181 @@ valida_relogio_ipmi '01/15/26 12:00:00' "$host_epoch" 2> "$work/clock"
 assert_has "$(cat "$work/clock")" 'sem fuso explícito' 'aviso apenas se falta offset'
 IPMI_CLOCK_OK=1
 CURRENT_BOOT_EPOCH="$(date -d '2026-01-15T11:00:00-03:00' +%s)"
+PREVIOUS_BOOT_START_EPOCH="$(date -d '2026-01-15T09:00:00-03:00' +%s)"
 short_sel='0002 | 01/15/26 | 10:58:00 -03 | Power Supply #0x01 | Power Supply AC lost | Asserted'
 assert_eq "$(filtra_ipmi_proximo '2026-01-15T10:55:00.500000-03:00' "$short_sel")" "$short_sel" 'correlação SEL ano curto'
 old_sel='0001 | 01/15/26 | 09:30:00 -03 | Power Supply #0x01 | Power Supply AC lost | Asserted'
 assert_eq "$(filtra_ipmi_proximo '2026-01-15T10:55:00.500000-03:00' "$old_sel")" '' 'evento sintético fora da janela não está na janela'
+
+# Regressao: proximidade nao substitui estado do sensor nem origem do journal.
+REF_TS='2026-01-15T12:21:00Z'
+CURRENT_BOOT_EPOCH="$(date -d '2026-01-15T12:22:00Z' +%s)"
+PREVIOUS_BOOT_START_EPOCH="$(date -d '2026-01-15T10:00:00Z' +%s)"
+IPMI_CLOCK_OK=1
+pair=$'0001 | 01/15/2026 | 12:10:00 UTC | Power Supply #0x01 | Power Supply AC lost | Asserted\n0002 | 01/15/2026 | 12:10:05 UTC | Power Supply #0x01 | Power Supply AC lost | Deasserted'
+normal='2026-01-15T12:21:00Z host-exemplo systemd[1]: Reached target poweroff.target - System Power Off.'
+near="$(filtra_ipmi_proximo "$REF_TS" "$pair")"
+assert_eq "$(seleciona_falhas_ipmi "$near" "$REF_TS")" '' 'recuperacao antes da referencia cancela perda'
+analyze "$normal" '' '' "$near"
+assert_eq "$EXIT_CODE" 0 'recuperacao e desligamento ordenado preservam mecanismo'
+assert_has "$result" 'Sequência de reinício/desligamento ordenado' 'energia nao sobrepoe sequencia normal'
+assert_lacks "$result" 'Causa provável:' 'falha ja recuperada nao e causa provavel'
+assert_has "$result" 'Deasserted' 'recuperacao continua visivel nos indicios'
+analyze "$log" '' '' "$near" ''
+assert_eq "$EXIT_CODE" 2 'falha recuperada e boot abrupto nao confirmam causa'
+active="${pair%%$'\n'*}"
+analyze "$normal" '' '' "$active"
+assert_lacks "$result" 'Causa provável:' 'ate perda sem recuperacao nao sobrepoe sequencia normal'
+analyze "$log" '' '' "$active" ''
+assert_eq "$EXIT_CODE" 0 'perda sem recuperacao na referencia permanece candidata'
+analyze "$request_log" '' '' "$active"
+assert_has "$result" 'Solicitação de desligamento registrada' 'solicitacao explicita tem prioridade sobre SEL'
+other_pair="$pair"
+other_pair="${other_pair/12:10:05 UTC | Power Supply #0x01/12:10:05 UTC | Power Supply #0x02}"
+assert_eq "$(seleciona_falhas_ipmi "$other_pair" "$REF_TS")" "$active" 'recuperacao de outro sensor nao cancela perda'
+assert_eq "$(seleciona_falhas_ipmi "${pair/12:10:05/12:21:05}" "$REF_TS")" "$active" 'recuperacao apos ultimo registro nao descarta possivel interrupcao'
+assert_eq "$(seleciona_falhas_ipmi "${pair/12:10:05/12:21:00}" "$REF_TS")" '' 'recuperacao exatamente na referencia cancela perda'
+assert_eq "$(seleciona_falhas_ipmi "${pair#*$'\n'}"$'\n'"$active" "$REF_TS")" '' 'ordena datas antes de avaliar recuperacao'
+new_loss='0003 | 01/15/2026 | 12:21:10 UTC | Power Supply #0x01 | Power Supply AC lost | Asserted'
+assert_eq "$(seleciona_falhas_ipmi "$pair"$'\n'"$new_loss" "$REF_TS")" "$new_loss" 'nova perda depois da recuperacao e considerada'
+assert_eq "$(seleciona_falhas_ipmi "$pair" '')" '' 'sem referencia nao determina estado causal'
+
+PREVIOUS_BOOT_START_EPOCH="$(date -d '2026-01-15T12:20:00Z' +%s)"
+assert_eq "$(filtra_ipmi_proximo "$REF_TS" "$pair")" '' 'nao correlaciona evento anterior aos registros do boot'
+boundary='0004 | 01/15/2026 | 12:20:00 UTC | Power Supply #0x01 | Power Supply AC lost | Asserted'
+assert_eq "$(filtra_ipmi_proximo "$REF_TS" "$boundary")" "$boundary" 'aceita limite inferior do boot'
+assert_eq "$(filtra_ipmi_proximo "$REF_TS" "${boundary/12:20:00/12:22:00}")" '' 'evento no inicio do boot atual nao e do anterior'
+PREVIOUS_BOOT_START_EPOCH=''
+assert_eq "$(filtra_ipmi_proximo "$REF_TS" "$active")" '' 'sem limite inferior SEL fica historico'
+
+quoted='2026-01-15T12:21:00Z host-exemplo app[42]: example: systemd[1]: Reached target poweroff.target - System Power Off.'
+analyze "$quoted" '' '' '' ''
+assert_eq "$EXIT_CODE" 2 'citacao por aplicativo nao confirma desligamento'
+assert_eq "$(extrai_shutdown_ts "$quoted")" '' 'citacao nao contamina linha do tempo'
+analyze "$normal" '' '' '' ''
+assert_eq "$EXIT_CODE" 2 'tag systemd sem metadados confiaveis nao basta'
+analyze "$quoted" '' '' '' "$quoted"
+assert_eq "$EXIT_CODE" 2 'padrao exige emissor e inicio da mensagem mesmo na coleta confiavel'
+quoted_logind='2026-01-15T12:21:00Z host-exemplo app[42]: systemd-logind[800]: System is powering down.'
+analyze "$quoted_logind" '' '' '' "$quoted_logind"
+assert_eq "$EXIT_CODE" 2 'citacao logind nao e solicitacao real'
+
+# Limite de memoria, status do produtor e contagem de registros multiline.
+status=0
+captura_limitada 8 printf '123456789012345' > "$work/bounded" || status=$?
+assert_eq "$status" 4 'limite de bytes sinaliza corte deliberado'
+assert_eq "$(cat "$work/bounded")" 12345678 'saida limitada em bytes'
+status=0
+captura_limitada 3 printf '\n\n\n\n' > "$work/bounded" || status=$?
+assert_eq "$status" 4 'newlines finais tambem contam no limite'
+assert_eq "$(wc -c < "$work/bounded" | tr -d ' ')" 3 'preserva newlines ate o limite'
+status=0
+captura_limitada 3 bash -c 'printf parcial; exit 124' > "$work/bounded" || status=$?
+assert_eq "$status" 124 'timeout nao e confundido com corte por tamanho'
+assert_eq "$(cat "$work/bounded")" '' 'descarta dados de produtor com falha'
+status=0
+captura_limitada 3 bash -c 'printf parcial; exit 1' > "$work/bounded" || status=$?
+assert_eq "$status" 1 'erro de leitura nao e ignorado por limite'
+status=0
+captura_limitada 3 printf 'abc' > "$work/bounded" || status=$?
+assert_eq "$status" 0 'tamanho exatamente no limite e valido'
+status=0
+captura_limitada 8 yes 'linha sintetica' > "$work/bounded" || status=$?
+assert_eq "$status" 4 'SIGPIPE por corte de produtor continuo e esperado'
+assert_eq "$(wc -c < "$work/bounded" | tr -d ' ')" 8 'produtor continuo permanece limitado'
+
+MODE=FAST
+BOOT_END_EPOCH=1768479660.000000
+BOOT_END_TS="$REF_TS"
+PREVIOUS_BOOT_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+# shellcheck disable=SC2329
+timeout() { shift 3; "$@"; }
+# shellcheck disable=SC2329
+journalctl() { printf '%s\n' "$*" > "$work/args"; printf '%s\n' "$normal"; }
+coleta_journal_sistema_boot_anterior > "$work/system" 2> "$work/warnings"
+assert_has "$(cat "$work/args")" '_PID=1 _UID=0 + _SYSTEMD_UNIT=systemd-logind.service _COMM=systemd-logind _UID=0' 'filtro na fonte usa metadados confiaveis'
+assert_lacks "$(cat "$work/args")" 'SYSLOG_IDENTIFIER=' 'tag fornecida pelo aplicativo nao e autoridade'
+assert_has "$(cat "$work/args")" '--until @1768479660.000000' 'coleta confiavel preserva janela'
+JOURNAL_MAX_BYTES=16
+status=0
+coleta_journal_boot_anterior > "$work/too-big" 2> "$work/warnings" || status=$?
+assert_eq "$status" 3 'journal excedente e erro de coleta'
+assert_eq "$(cat "$work/too-big")" '' 'journal cortado nao alimenta diagnostico'
+assert_has "$(cat "$work/warnings")" 'bytes excedido' 'limite explica indisponibilidade'
+JOURNAL_MAX_BYTES=8388608
+FAST_LIMIT=2
+# shellcheck disable=SC2329
+journalctl() { printf '%s\n' "$normal" '    continuation one' '    continuation two'; }
+coleta_journal_boot_anterior > /dev/null 2> "$work/warnings"
+assert_lacks "$(cat "$work/warnings")" 'registros atingido' 'continuacoes nao sao contadas como registros'
+# shellcheck disable=SC2329
+journalctl() { printf '%s\n' "$normal" "$normal"; }
+coleta_journal_boot_anterior > /dev/null 2> "$work/warnings"
+assert_has "$(cat "$work/warnings")" '2 registros atingido' 'avisa limite real de registros'
+FAST_LIMIT=1500
+# shellcheck disable=SC2329
+journalctl() { :; }
+status=0
+coleta_journal_sistema_boot_anterior > /dev/null 2> "$work/warnings" || status=$?
+assert_eq "$status" 0 'coleta confiavel vazia e normal'
+
+# Inicio e fim independentes; erro opcional de limite inferior bloqueia so o SEL.
+MODE=FULL
+# shellcheck disable=SC2329
+journalctl() {
+    if [[ "$1" == '--list-boots' ]]; then
+        printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
+    elif [[ " $* " == *' --no-tail '* ]]; then
+        printf '%s\n' '__REALTIME_TIMESTAMP=1768479600000000'
+        printf '%05000d\n' 0
+    else
+        printf '%s\n' '__REALTIME_TIMESTAMP=1768479660000000'
+    fi
+}
+prepara_journal
+assert_eq "$PREVIOUS_BOOT_START_EPOCH" 1768479600 'primeiro registro lido mesmo com corte deliberado de metadados'
+assert_eq "$BOOT_END_EPOCH" 1768479660.000000 'ultima referencia permanece independente'
+# shellcheck disable=SC2329
+journalctl() {
+    if [[ "$1" == '--list-boots' ]]; then
+        printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
+    elif [[ " $* " == *' --no-tail '* ]]; then
+        printf '%s\n' '__REALTIME_TIMESTAMP=1768479600000000'; return 124
+    else
+        printf '%s\n' '__REALTIME_TIMESTAMP=1768479660000000'
+    fi
+}
+prepara_journal 2> "$work/warnings"
+assert_eq "$PREVIOUS_BOOT_START_EPOCH" '' 'descarta inicio parcial em timeout'
+assert_has "$(cat "$work/warnings")" 'SEL apenas como histórico' 'explica limite inferior indisponivel'
+unset -f journalctl timeout
+
+mkdir "$work/bad-logs"
+printf 'not gzip\n' > "$work/bad-logs/syslog.gz"
+coleta_logs_aux "$work/bad-logs" > "$work/history" 2> "$work/warnings"
+assert_eq "$(cat "$work/history")" '' 'gzip corrompido nao gera evidencia parcial'
+assert_has "$(cat "$work/warnings")" 'Coleta histórica incompleta' 'erro historico e visivel'
+assert_lacks "$(cat "$work/warnings")" 'Nenhum evento relevante encontrado' 'falha nao e ausencia de eventos'
+printf '%s\n' "$active" > "$work/bad-logs/syslog"
+# shellcheck disable=SC2329
+timeout() { printf '%s\n' "$active"; return 124; }
+coleta_logs_aux "$work/bad-logs" > "$work/history" 2> "$work/warnings"
+assert_eq "$(cat "$work/history")" '' 'timeout historico descarta parcial'
+assert_has "$(cat "$work/warnings")" 'código 124' 'timeout historico identificado'
+unset -f timeout
+mkdir "$work/large-logs"
+{
+    echo 'example kernel: Kernel panic - synthetic historical event'
+    awk 'BEGIN {for (i=0; i<10000; i++) print "normal historical record with no causal pattern"}'
+} | gzip > "$work/large-logs/syslog.gz"
+AUX_MAX_BYTES=128
+coleta_logs_aux "$work/large-logs" > "$work/history" 2> "$work/warnings"
+assert_has "$(cat "$work/history")" 'Kernel panic - synthetic historical event' 'corte gzip preserva linha completa da amostra'
+assert_has "$(cat "$work/warnings")" 'amostra descompactada limitada' 'corte deliberado e anunciado'
+assert_lacks "$(cat "$work/warnings")" 'Coleta histórica incompleta' 'SIGPIPE esperado nao vira falha de leitura'
+AUX_MAX_BYTES=2097152
+mkdir "$work/empty-logs"
+coleta_logs_aux "$work/empty-logs" > /dev/null 2> "$work/warnings"
+assert_has "$(cat "$work/warnings")" 'Nenhuma amostra histórica pôde ser consultada' 'diretorio vazio nao implica consulta bem sucedida'
+
 printf 'OK: %s verificações com dados sintéticos.\n' "$checks"

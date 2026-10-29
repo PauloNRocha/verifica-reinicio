@@ -1,0 +1,43 @@
+name: Validacao Bash
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regressao:
+    name: Testes em ${{ matrix.imagem }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        imagem: [debian:12-slim, debian:13-slim, ubuntu:24.04, ubuntu:26.04]
+    container:
+      image: ${{ matrix.imagem }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Instalar ferramentas somente no container de CI
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y bash coreutils grep sed mawk gzip git ca-certificates shellcheck
+      - name: Obter o codigo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validar sintaxe e analise estatica
+        run: |
+          bash -n verifica-reinicio.sh
+          for arquivo in tests/*.sh; do bash -n "$arquivo"; done
+          shellcheck -x -P SCRIPTDIR verifica-reinicio.sh tests/*.sh
+          git diff --check
+      - name: Executar regressoes sinteticas sem acesso a hardware
+        run: bash tests/regressao.sh

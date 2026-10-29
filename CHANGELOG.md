@@ -2,6 +2,24 @@
 
 As datas seguem o histórico Git quando existe commit correspondente. Uma entrada neste arquivo não implica tag ou release publicada. As versões 1.0.0 e 1.2.2 têm observações específicas abaixo para não atribuir ao histórico versões que não foram publicadas separadamente.
 
+## 1.3.4 — 2026-10-29
+
+- Corrige a referência temporal do journal: usa `__REALTIME_TIMESTAMP` (recebimento) em vez do horário exibido por `short-unix`, que pode ser o de origem. A diferença podia excluir o último registro e produzir uma coleta vazia apesar de existir boot anterior.
+- Mantém ID de boot fixo, janela temporal, microssegundos e limites FAST/FULL, sem dependências novas ou consulta causal sem janela.
+- Distingue inconsistência de coleta de ausência de logs: consulta geral vazia após referência válida ou timestamp inválido retornam `3`. Uma janela sem eventos de kernel continua sendo válida.
+- Acrescenta regressões sintéticas para atraso de recebimento e atualiza a explicação da janela no README.
+- Corrige a classificação de desligamentos por terminal/menu: mensagens genéricas do logind não são mais apresentadas como ACPI, botão ou possível glitch elétrico.
+- Reconhece `poweroff.target`, `reboot.target` e `halt.target` alcançados como sequência ordenada registrada, sem afirmar a conclusão física do desligamento. Eventos explícitos `Power key pressed` são mostrados separadamente; isolados, mantêm resultado inconclusivo.
+- Inclui regressões para solicitação genérica, desligamento ordenado em FAST/FULL, tecla de energia e etapas intermediárias sem conclusão registrada.
+- Correlaciona perdas e recuperações IPMI por sensor/condição: recuperação até a referência cancela a perda anterior. Sequência/solicitação de desligamento registrada não é substituída por hipótese elétrica.
+- Restringe o SEL ao intervalo do boot analisado, usando o primeiro registro disponível como limite conservador; sem essa referência, mantém apenas histórico. Usa recebimento do último registro como referência IPMI, sem misturar horário de origem.
+- Separa coleta geral de coleta confiável do sistema, filtrada por metadados de PID/UID/unidade/processo. Mensagens citadas por aplicativos ou tags semelhantes não confirmam desligamento.
+- Limita bytes nas consultas do journal e nos metadados; descarta amostras do journal que excedam o teto e informa erro. Contagem de registros não inclui continuações de mensagens multilinha.
+- Normaliza `SIGPIPE` apenas nos produtores das capturas limitadas, inclusive sob supervisores que ignoram esse sinal; verifica suporte a `env --default-signal` antes da coleta (GNU coreutils 8.31+).
+- Expõe falhas/timeouts e ausência de amostras na coleta histórica; não usa saída parcial de consultas que falharam. Mantém o corte deliberado de amostras `.gz`, com aviso.
+- Executa cenários de integração em processos Bash independentes, preservando `errexit`/`ERR`; amplia regressões dos casos revisados.
+- Configura CI em Debian 12/13 e Ubuntu 24.04/26.04 com permissões mínimas e action fixada por commit; inclui o texto integral da GPLv3 e atualiza o README.
+
 ## 1.3.3 — 2026-09-23
 
 - Destaca resultado e grau de certeza: vermelho para reinício possivelmente abrupto ou panic, amarelo para causa incerta e indício elétrico, ciano para ACPI e verde para sequência registrada.
