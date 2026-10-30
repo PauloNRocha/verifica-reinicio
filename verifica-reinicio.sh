@@ -822,7 +822,7 @@ main() {
         EXIT_CODE=3
     fi
     if [[ "$MODE" == "FULL" ]]; then
-        aux="$(coleta_logs_aux)"
+        aux="$(coleta_logs_aux /var/log)"
     fi
     SHUTDOWN_TS="$(extrai_shutdown_ts "$journal_sistema")"
     # Para correlação usamos recebimento; o horário de origem é só apresentação.

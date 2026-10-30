@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Cenários sintéticos com hostnames, sensores e identificadores fictícios. Não consulta journal/IPMI real nem carrega módulos.
+# Mocks chamados via wrappers/timeout: SC2317 (0.9/0.10) e SC2329 (0.11).
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../verifica-reinicio.sh
@@ -7,7 +8,7 @@ source "$root/verifica-reinicio.sh"
 init_colors
 # Permite mocks de comandos em funcao sem exporta-los ao ambiente. Comandos
 # reais continuam usando env e sua normalizacao de SIGPIPE, como em producao.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 env() {
     if [[ "${1:-}" == '--default-signal=PIPE' && "$(type -t "${2:-}" || true)" == function ]]; then
         shift
@@ -187,9 +188,9 @@ BOOT_END_EPOCH='1770218480.500000'
 BOOT_END_TS="$end"
 PREVIOUS_BOOT_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 # Mock chamado indiretamente por timeout.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() { printf '%s\n' "$*" > "$work/args"; printf '%s\n' "$log"; }
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 timeout() { shift 3; "$@"; }
 coleta_journal_boot_anterior > "$work/journal"
 assert_has "$(cat "$work/args")" '--until @1770218480.500000' 'preserva fração no limite superior'
@@ -258,9 +259,9 @@ CURRENT_BOOT_EPOCH="$(date -d '2026-02-04T12:29:45-03:00' +%s)"
 # Prepara journal com listagem sintética, mantendo o boot atual real apenas como âncora.
 mock_current_id="$(tr -d '-' < /proc/sys/kernel/random/boot_id)"
 mock_current_id="${mock_current_id//$'\n'/}"
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 timeout() { shift 3; "$@"; }
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() {
     printf '%s\n' "$*" > "$work/args"
     if [[ "$1" == '--list-boots' ]]; then
@@ -275,7 +276,7 @@ assert_eq "$PREVIOUS_BOOT_ID" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 'fixa ID do boot'
 assert_has "$(cat "$work/args")" '-o export --output-fields=__REALTIME_TIMESTAMP' 'referência usa metadado de recebimento'
 # Um único registro no fim da janela: a origem antecede o recebimento em 1103 us.
 # A consulta antiga o excluía, embora o histórico mostrasse o boot anterior.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() {
     if [[ "$1" == '--list-boots' ]]; then
         printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
@@ -314,7 +315,7 @@ for mode in FAST FULL; do
     assert_eq "$(cat "$work/kernel")" '' "$mode não amplia janela para buscar kernel antigo"
 done
 # Coleta geral vazia após referência válida é erro, não ausência normal de journal.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() { :; }
 coleta_journal_boot_anterior > "$work/empty" 2> "$work/empty-error" && status=0 || status=$?
 assert_eq "$status" 3 'consulta geral inconsistente retorna erro'
@@ -327,7 +328,7 @@ run_case inconsistent-main
 assert_eq "$status" 3 'main propaga inconsistência da consulta geral'
 assert_has "$(cat "$work/inconsistent-main")" 'Análise indisponível:' 'resultado distingue falha de coleta na execução completa'
 # A conversão usa aritmética inteira e conserva zeros nos microssegundos.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() {
     if [[ "$1" == '--list-boots' ]]; then
         printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
@@ -337,7 +338,7 @@ journalctl() {
 }
 prepara_journal
 assert_eq "$BOOT_END_EPOCH" '1770218480.001103' 'conversão preserva zeros nos microssegundos'
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() {
     if [[ "$1" == '--list-boots' ]]; then
         printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
@@ -350,7 +351,7 @@ assert_eq "$BOOT_END_EPOCH" '' 'referência inválida não libera consulta sem j
 assert_eq "$EXIT_CODE" 3 'metadado inválido é erro de coleta'
 assert_eq "$(coleta_journal_boot_anterior)" '' 'não coleta sem referência válida'
 # Um timestamp de origem isolado nunca substitui o metadado de recebimento.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() {
     if [[ "$1" == '--list-boots' ]]; then
         printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
@@ -364,7 +365,7 @@ unset -f journalctl timeout
 # Ausência de journalctl: não confundir com evidência de falha elétrica.
 (
     # Mock consultado indiretamente pela coleta.
-    # shellcheck disable=SC2329
+    # shellcheck disable=SC2317,SC2329
     command() {
         if [[ "$*" == '-v journalctl' ]]; then return 1; fi
         builtin command "$@"
@@ -376,7 +377,7 @@ unset -f journalctl timeout
 assert_has "$(cat "$work/missing")" 'journalctl não encontrado' 'degrada sem journalctl'
 # Falha no journal é distinguida de ausência de evidências.
 BOOT_END_EPOCH='1770218480.500000'
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 timeout() { return 124; }
 coleta_journal_boot_anterior > /dev/null 2>&1 && status=0 || status=$?
 assert_eq "$status" 3 'timeout journal retorna erro'
@@ -391,9 +392,9 @@ assert_has "$(cat "$work/full")" 'old kernel: Kernel panic' 'FULL mantém histó
 # Falhas opcionais do BMC: simula timeout e relógio divergente.
 
 # Apenas presença do comando: timeout simulado fornece o resultado.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 ipmitool() { :; }
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 modprobe() { :; }
 timeout() {
     case "$*" in
@@ -587,9 +588,9 @@ MODE=FAST
 BOOT_END_EPOCH=1768479660.000000
 BOOT_END_TS="$REF_TS"
 PREVIOUS_BOOT_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 timeout() { shift 3; "$@"; }
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() { printf '%s\n' "$*" > "$work/args"; printf '%s\n' "$normal"; }
 coleta_journal_sistema_boot_anterior > "$work/system" 2> "$work/warnings"
 assert_has "$(cat "$work/args")" '_PID=1 _UID=0 + _SYSTEMD_UNIT=systemd-logind.service _COMM=systemd-logind _UID=0' 'filtro na fonte usa metadados confiaveis'
@@ -603,16 +604,16 @@ assert_eq "$(cat "$work/too-big")" '' 'journal cortado nao alimenta diagnostico'
 assert_has "$(cat "$work/warnings")" 'bytes excedido' 'limite explica indisponibilidade'
 JOURNAL_MAX_BYTES=8388608
 FAST_LIMIT=2
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() { printf '%s\n' "$normal" '    continuation one' '    continuation two'; }
 coleta_journal_boot_anterior > /dev/null 2> "$work/warnings"
 assert_lacks "$(cat "$work/warnings")" 'registros atingido' 'continuacoes nao sao contadas como registros'
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() { printf '%s\n' "$normal" "$normal"; }
 coleta_journal_boot_anterior > /dev/null 2> "$work/warnings"
 assert_has "$(cat "$work/warnings")" '2 registros atingido' 'avisa limite real de registros'
 FAST_LIMIT=1500
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() { :; }
 status=0
 coleta_journal_sistema_boot_anterior > /dev/null 2> "$work/warnings" || status=$?
@@ -620,7 +621,7 @@ assert_eq "$status" 0 'coleta confiavel vazia e normal'
 
 # Inicio e fim independentes; erro opcional de limite inferior bloqueia so o SEL.
 MODE=FULL
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() {
     if [[ "$1" == '--list-boots' ]]; then
         printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
@@ -634,7 +635,7 @@ journalctl() {
 prepara_journal
 assert_eq "$PREVIOUS_BOOT_START_EPOCH" 1768479600 'primeiro registro lido mesmo com corte deliberado de metadados'
 assert_eq "$BOOT_END_EPOCH" 1768479660.000000 'ultima referencia permanece independente'
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 journalctl() {
     if [[ "$1" == '--list-boots' ]]; then
         printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
@@ -656,7 +657,7 @@ assert_eq "$(cat "$work/history")" '' 'gzip corrompido nao gera evidencia parcia
 assert_has "$(cat "$work/warnings")" 'Coleta histórica incompleta' 'erro historico e visivel'
 assert_lacks "$(cat "$work/warnings")" 'Nenhum evento relevante encontrado' 'falha nao e ausencia de eventos'
 printf '%s\n' "$active" > "$work/bad-logs/syslog"
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 timeout() { printf '%s\n' "$active"; return 124; }
 coleta_logs_aux "$work/bad-logs" > "$work/history" 2> "$work/warnings"
 assert_eq "$(cat "$work/history")" '' 'timeout historico descarta parcial'
