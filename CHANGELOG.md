@@ -2,6 +2,12 @@
 
 As datas seguem o histórico Git quando existe commit correspondente. Uma entrada neste arquivo não implica tag ou release publicada. As versões 1.0.0 e 1.2.2 têm observações específicas abaixo para não atribuir ao histórico versões que não foram publicadas separadamente.
 
+## Não publicado
+
+- Corrige a compatibilidade da CI com ShellCheck 0.9/0.10: passa o diretório de logs explicitamente e documenta os mocks chamados indiretamente, sem desativar a análise do código de produção.
+- Restringe a exceção `safe.directory` ao checkout e a cada comando Git de validação; verifica que existe uma árvore de trabalho e confere também whitespace do commit. Não usa confiança global em todos os repositórios.
+- Registra as versões de Bash/ShellCheck na CI para facilitar a comparação com a validação local.
+
 ## 1.3.4 — 2026-10-29
 
 - Corrige a referência temporal do journal: usa `__REALTIME_TIMESTAMP` (recebimento) em vez do horário exibido por `short-unix`, que pode ser o de origem. A diferença podia excluir o último registro e produzir uma coleta vazia apesar de existir boot anterior.

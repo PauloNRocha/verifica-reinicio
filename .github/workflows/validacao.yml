@@ -35,9 +35,15 @@ jobs:
           persist-credentials: false
       - name: Validar sintaxe e analise estatica
         run: |
+          bash --version | head -n 1
+          shellcheck --version
           bash -n verifica-reinicio.sh
           for arquivo in tests/*.sh; do bash -n "$arquivo"; done
           shellcheck -x -P SCRIPTDIR verifica-reinicio.sh tests/*.sh
-          git diff --check
+      - name: Validar checkout e whitespace
+        run: |
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" -C "$GITHUB_WORKSPACE" rev-parse --is-inside-work-tree)" = true
+          git -c safe.directory="$GITHUB_WORKSPACE" -C "$GITHUB_WORKSPACE" diff --check
+          git -c safe.directory="$GITHUB_WORKSPACE" -C "$GITHUB_WORKSPACE" show --format= --check HEAD
       - name: Executar regressoes sinteticas sem acesso a hardware
         run: bash tests/regressao.sh
