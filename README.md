@@ -2,7 +2,9 @@
 
 Ferramenta Bash para investigar o último reinício ou desligamento de um servidor Linux. Reúne registros do journal, identifica evidências e, no modo FULL, consulta logs históricos e o SEL do IPMI.
 
-**Versão:** 1.3.4 — 29 de outubro de 2026
+**Versão:** 1.3.5 — 6 de novembro de 2026
+
+**Status:** em preparação, ainda não publicada.
 
 O foco é Debian 12/13, Ubuntu e hosts Proxmox VE com systemd. A ferramenta não comprova automaticamente a causa de todo reinício: ausência de logs, retenção, relógios divergentes e falhas de hardware podem impedir uma conclusão.
 
