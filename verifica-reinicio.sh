@@ -54,6 +54,11 @@ CURRENT_BOOT_EPOCH=""
 JOURNAL_TIMEOUT=30
 JOURNAL_MAX_BYTES=8388608
 JOURNAL_PREFIX='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+'
+# Estados internos da coleta: 0 completa na janela, 2 indisponível, 3 falha,
+# 4 potencialmente incompleta, 5 corte por bytes (dados descartados).
+JOURNAL_STATUS=2
+KERNEL_STATUS=2
+SYSTEM_STATUS=2
 IPMI_TIMEOUT=30
 IPMI_LIST_TIMEOUT=60
 IPMI_TIME_WINDOW=900
@@ -308,14 +313,38 @@ prepara_journal() {
     fi
 }
 
+conta_registros_journal() {
+    local metadata status=0
+    metadata="$(LC_ALL=C captura_limitada "$JOURNAL_MAX_BYTES" "$@" \
+        -o export --output-fields=__CURSOR 2>/dev/null)" || status=$?
+    (( status != 4 )) || return 4
+    (( status == 0 )) || return 3
+    # Metadado de endereçamento: não depende de MESSAGE nem de linhas multilinha.
+    awk '/^__CURSOR=/ {n++} END {print n+0}' <<< "$metadata"
+}
+
+tempo_monotonico_cs() {
+    local uptime _idle
+    # CLOCK_BOOTTIME do Linux: inclui suspensao, sem saltos do horario civil.
+    IFS=' ' read -r uptime _idle 2>/dev/null < /proc/uptime || return 1
+    [[ "$uptime" =~ ^[0-9]+\.[0-9]{2}$ ]] || return 1
+    printf '%s\n' "$((10#${uptime%.*} * 100 + 10#${uptime#*.}))"
+}
+
 coleta_journal_boot_anterior() {
-    local kind="${1:-geral}" limite="$FAST_LIMIT" since_epoch data status=0
+    local kind="${1:-geral}" limite="$FAST_LIMIT" since_epoch data status=0 registros total remaining
+    local inicio agora deadline
     local extra=()
     [[ "$MODE" == "FULL" ]] && limite="$FULL_LIMIT"
     [[ "$kind" == "kernel" ]] && extra=(-k)
     # Não usamos SYSLOG_IDENTIFIER/PID fornecidos pelo aplicativo como autoridade.
     [[ "$kind" == "sistema" ]] && extra=(_PID=1 _UID=0 + _SYSTEMD_UNIT=systemd-logind.service _COMM=systemd-logind _UID=0)
-    [[ -n "$BOOT_END_EPOCH" && -n "$PREVIOUS_BOOT_ID" ]] || return 0
+    [[ -n "$BOOT_END_EPOCH" && -n "$PREVIOUS_BOOT_ID" ]] || return 2
+    if ! inicio="$(tempo_monotonico_cs)"; then
+        echo "Erro: relógio monotônico indisponível para limitar a coleta do journal ($kind)." >&2
+        return 3
+    fi
+    deadline=$((inicio + JOURNAL_TIMEOUT * 100))
     since_epoch=$(( ${BOOT_END_EPOCH%%.*} - CAUSE_WINDOW_SEC ))
     (( since_epoch < 0 )) && since_epoch=0
     echo "Coletando journal ($kind), janela de ${CAUSE_WINDOW_SEC}s, até $BOOT_END_TS..." >&2
@@ -324,7 +353,7 @@ coleta_journal_boot_anterior() {
         --quiet --no-pager -o short-iso-precise 2>/dev/null)" || status=$?
     if (( status == 4 )); then
         echo "Erro: limite de $JOURNAL_MAX_BYTES bytes excedido no journal ($kind); amostra descartada para não analisar registro cortado." >&2
-        return 3
+        return 5
     elif (( status != 0 )); then
         echo "Erro: falha ou timeout na coleta do journal ($kind)." >&2
         return 3
@@ -333,11 +362,46 @@ coleta_journal_boot_anterior() {
         echo "Erro: boot anterior identificado, mas a consulta temporal do journal retornou vazia; a coleta está inconsistente ou os registros foram removidos durante a análise." >&2
         return 3
     fi
-    # No formato short, continuações são indentadas; linhas não equivalem a registros.
-    if (( $(awk '/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T/ {n++} END {print n+0}' <<< "$data") >= limite )); then
+    registros="$(awk '/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T/ {n++} END {print n+0}' <<< "$data")"
+    if (( registros >= limite )); then
         echo "Aviso: limite de $limite registros atingido; a janela pode estar incompleta." >&2
+        status=4
+    else
+        # A saída curta pode omitir registros sem MESSAGE. Confere os endereços
+        # com os mesmos filtros e limite, sem somar outro orçamento de 30 segundos.
+        if ! agora="$(tempo_monotonico_cs)" || (( agora < inicio )); then
+            echo "Erro: relógio monotônico inválido ao verificar completude do journal ($kind)." >&2
+            printf '%s\n' "$data"
+            return 3
+        fi
+        # Reserva 1 centesimo para a resolucao de /proc/uptime. Zero desativaria timeout.
+        remaining=$((deadline - agora - 1))
+        if (( remaining <= 0 )); then
+            echo "Erro: orçamento de tempo esgotado ao verificar completude do journal ($kind)." >&2
+            printf '%s\n' "$data"
+            return 3
+        fi
+        printf -v remaining '%d.%02d' "$((remaining / 100))" "$((remaining % 100))"
+        total="$(conta_registros_journal timeout -k 3s "${remaining}s" journalctl -b "$PREVIOUS_BOOT_ID" "${extra[@]}" \
+            --since "@$since_epoch" --until "@$BOOT_END_EPOCH" -n "$limite" --quiet --no-pager)" || status=$?
+        if (( status != 0 && status != 4 )); then
+            echo "Erro: falha ou timeout na verificação de completude do journal ($kind)." >&2
+            # A consulta de dados terminou com sucesso; falhar na conferência não
+            # invalida uma evidência positiva íntegra que já tenha sido recebida.
+            printf '%s\n' "$data"
+            return 3
+        fi
+        if (( status == 4 )) || [[ "$total" != "$registros" ]] || (( total >= limite )); then
+            echo "Aviso: completude do journal ($kind) não confirmada; limite de metadados/registros ou entradas omitidas na saída curta." >&2
+            status=4
+        fi
+    fi
+    if grep -qE '\[[^]]+ blob data\]$' <<< "$data"; then
+        echo "Aviso: journal ($kind) contém conteúdo não exibido no formato curto." >&2
+        status=4
     fi
     printf '%s\n' "$data"
+    return "$status"
 }
 
 coleta_journal_kernel_boot_anterior() {
@@ -433,6 +497,8 @@ analisa_reinicio() {
     )"
     shutdown="$(extrai_shutdown_ts "$sistema")"
     clues="$(filtra_indicios "$kernel" "$limite")"
+    local completa=0 estado
+    if (( JOURNAL_STATUS == 0 && KERNEL_STATUS == 0 && SYSTEM_STATUS == 0 )); then completa=1; fi
 
     echo -e "${C_BOLD}${C_GREEN}=========== ANÁLISE DO MOTIVO DO REINÍCIO ==========${C_RESET}"
     local result=2
@@ -450,7 +516,7 @@ analisa_reinicio() {
         echo "O registro não distingue terminal, menu ou automação nem comprova a conclusão do desligamento."
         printf '%s\n' "$request"
         result=0
-    elif [[ -n "$ipmi_power" && -z "$shutdown" && "$EXIT_CODE" -ne 3 ]]; then
+    elif [[ -n "$ipmi_power" && -z "$shutdown" && "$EXIT_CODE" -ne 3 && "$completa" -eq 1 ]]; then
         echo -e "${C_BOLD}${C_YELLOW}Causa provável: Perda/instabilidade de energia (rede elétrica/UPS/PSU).${C_RESET}"
         echo "Perda próxima ao fim do boot, sem recuperação registrada antes da referência; não comprova perda de todas as fontes."
         printf '%s\n' "$ipmi_power"
@@ -458,6 +524,8 @@ analisa_reinicio() {
     else
         if [[ -n "$shutdown" ]]; then
             echo -e "${C_BOLD}${C_YELLOW}Motivo não conclusivo:${C_RESET} início de desligamento sem evidência suficiente de conclusão ou causa."
+        elif [[ "$completa" -eq 0 && ( -n "$journal$kernel$sistema" || "$JOURNAL_STATUS" -eq 4 || "$KERNEL_STATUS" -eq 4 || "$SYSTEM_STATUS" -eq 4 ) ]]; then
+            echo -e "${C_BOLD}${C_YELLOW}Motivo não conclusivo:${C_RESET} coleta do journal incompleta; a ausência de mensagens não permite excluir desligamento ou outras causas."
         elif [[ -n "$journal" ]]; then
             echo -e "${C_BOLD}${C_RED}Reinício possivelmente abrupto:${C_RESET} não há sequência normal de shutdown no boot anterior."
             echo -e "${C_BOLD}${C_YELLOW}Causa não determinada.${C_RESET} Travamento, reset físico, perda de energia ou logs incompletos são possíveis."
@@ -474,7 +542,19 @@ analisa_reinicio() {
             fi
         fi
     fi
-    if [[ -n "$ipmi" && ( -z "$ipmi_power" || -n "$panic$reboot$request$shutdown" || "$EXIT_CODE" -eq 3 ) ]]; then
+    for estado in "geral:$JOURNAL_STATUS" "kernel:$KERNEL_STATUS" "sistema:$SYSTEM_STATUS"; do
+        case "${estado#*:}" in
+            0) continue ;;
+            2) echo "Coleta do journal (${estado%%:*}): indisponível." ;;
+            3) echo "Coleta do journal (${estado%%:*}): falha de coleta/conferência; só dados íntegros disponíveis são usados." ;;
+            4) echo "Coleta do journal (${estado%%:*}): potencialmente incompleta; evidências disponíveis preservadas." ;;
+            5) echo "Coleta do journal (${estado%%:*}): truncada por bytes; dados descartados." ;;
+        esac
+    done
+    if (( ! completa )) && [[ -n "$panic$reboot$request" ]]; then
+        echo "A evidência positiva acima foi registrada; a coleta incompleta não permite excluir outros eventos."
+    fi
+    if [[ -n "$ipmi" && ( -z "$ipmi_power" || -n "$panic$reboot$request$shutdown" || "$EXIT_CODE" -eq 3 || "$completa" -eq 0 ) ]]; then
         echo "------ Indícios IPMI na janela (exigem confirmação) ------"
         echo "Perdas recuperadas antes da referência não são causa provável; estados se referem à amostra, não à saúde atual."
         printf '%s\n' "$ipmi" | sed -n "1,${limite}p"
@@ -809,18 +889,15 @@ main() {
     prepara_journal
 
     local journal="" journal_kernel="" journal_sistema="" aux=""
-    if ! journal="$(coleta_journal_boot_anterior)"; then
-        journal=""
-        EXIT_CODE=3
-    fi
-    if ! journal_kernel="$(coleta_journal_kernel_boot_anterior)"; then
-        journal_kernel=""
-        EXIT_CODE=3
-    fi
-    if ! journal_sistema="$(coleta_journal_sistema_boot_anterior)"; then
-        journal_sistema=""
-        EXIT_CODE=3
-    fi
+    JOURNAL_STATUS=0
+    journal="$(coleta_journal_boot_anterior)" || JOURNAL_STATUS=$?
+    case "$JOURNAL_STATUS" in 0|2|4) : ;; 3) EXIT_CODE=3 ;; *) journal=""; EXIT_CODE=3 ;; esac
+    KERNEL_STATUS=0
+    journal_kernel="$(coleta_journal_kernel_boot_anterior)" || KERNEL_STATUS=$?
+    case "$KERNEL_STATUS" in 0|2|4) : ;; 3) EXIT_CODE=3 ;; *) journal_kernel=""; EXIT_CODE=3 ;; esac
+    SYSTEM_STATUS=0
+    journal_sistema="$(coleta_journal_sistema_boot_anterior)" || SYSTEM_STATUS=$?
+    case "$SYSTEM_STATUS" in 0|2|4) : ;; 3) EXIT_CODE=3 ;; *) journal_sistema=""; EXIT_CODE=3 ;; esac
     if [[ "$MODE" == "FULL" ]]; then
         aux="$(coleta_logs_aux /var/log)"
     fi

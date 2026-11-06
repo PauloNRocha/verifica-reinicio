@@ -4,6 +4,12 @@ As datas seguem o histórico Git quando existe commit correspondente. Uma entrad
 
 ## Não publicado
 
+- A-01 (revisão independente): substitui `local SECONDS=0`, que não avançava nos Bash reproduzidos, por prazo monotônico baseado em `/proc/uptime`. A conferência recebe apenas o saldo positivo, sem renovar o orçamento; mantém `-k 3s`, evidências íntegras e códigos públicos.
+- A-01: acrescenta regressões de orçamento com atrasos reais e medição independente. A análise de sintaxe/ShellCheck da CI passa a incluir `tests/fixtures/*.sh`, sem outras mudanças no workflow.
+- A-01: propaga separadamente a completude das coletas geral, kernel e sistema; atingir o limite de registros deixa de equivaler a sucesso completo para a heurística de ausência.
+- A-01: confere contagens por metadados quando a saída curta está abaixo do limite, cobrindo registros sem `MESSAGE` e conteúdo não exibido. Mantém filtros, limites de registros/bytes e orçamento compartilhado de tempo.
+- A-01: ausência em coleta incompleta não fundamenta aviso de reinício abrupto nem promoção de IPMI a causa provável. Preserva evidências positivas confiáveis disponíveis com aviso de incompletude.
+- A-01: distingue estados internos de falha e truncamento; preserva os códigos finais existentes, inclusive `3` em falha ou descarte dos dados por bytes. Acrescenta testes sintéticos de regressão e integração sem logs reais, root ou hardware; não altera a versão.
 - Corrige a compatibilidade da CI com ShellCheck 0.9/0.10: passa o diretório de logs explicitamente e documenta os mocks chamados indiretamente, sem desativar a análise do código de produção.
 - Restringe a exceção `safe.directory` ao checkout e a cada comando Git de validação; verifica que existe uma árvore de trabalho e confere também whitespace do commit. Não usa confiança global em todos os repositórios.
 - Registra as versões de Bash/ShellCheck na CI para facilitar a comparação com a validação local.
