@@ -2,9 +2,9 @@
 
 As datas seguem o histórico Git quando existe commit correspondente. Uma entrada neste arquivo não implica tag ou release publicada. As versões 1.0.0 e 1.2.2 têm observações específicas abaixo para não atribuir ao histórico versões que não foram publicadas separadamente.
 
-## 1.3.5 — Em preparação
+## 1.3.5 — 2026-11-06
 
-Preparação em 2026-11-06. Ainda não publicada.
+A data corresponde à identificação interna da versão, não à publicação no GitHub.
 
 - Identifica a correção A-01 como versão 1.3.5, atualizando apenas versão, data e documentação, sem modificar a implementação anteriormente auditada.
 - A-01 (revisão independente): substitui `local SECONDS=0`, que não avançava nos Bash reproduzidos, por prazo monotônico baseado em `/proc/uptime`. A conferência recebe apenas o saldo positivo, sem renovar o orçamento; mantém `-k 3s`, evidências íntegras e códigos públicos.

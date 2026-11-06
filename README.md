@@ -4,8 +4,6 @@ Ferramenta Bash para investigar o último reinício ou desligamento de um servid
 
 **Versão:** 1.3.5 — 6 de novembro de 2026
 
-**Status:** em preparação, ainda não publicada.
-
 O foco é Debian 12/13, Ubuntu e hosts Proxmox VE com systemd. A ferramenta não comprova automaticamente a causa de todo reinício: ausência de logs, retenção, relógios divergentes e falhas de hardware podem impedir uma conclusão.
 
 ## Como interpretar o resultado
