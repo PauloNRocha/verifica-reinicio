@@ -2,13 +2,21 @@
 
 As datas seguem o histórico Git quando existe commit correspondente. Uma entrada neste arquivo não implica tag ou release publicada. As versões 1.0.0 e 1.2.2 têm observações específicas abaixo para não atribuir ao histórico versões que não foram publicadas separadamente.
 
-## Não publicado
+## 1.3.5 — Em preparação
 
-- Corrige a compatibilidade da CI com ShellCheck 0.9/0.10: passa o diretório de logs explicitamente e documenta os mocks chamados indiretamente, sem desativar a análise do código de produção.
-- Restringe a exceção `safe.directory` ao checkout e a cada comando Git de validação; verifica que existe uma árvore de trabalho e confere também whitespace do commit. Não usa confiança global em todos os repositórios.
-- Registra as versões de Bash/ShellCheck na CI para facilitar a comparação com a validação local.
+Preparação em 2026-11-06. Ainda não publicada.
+
+- Identifica a correção A-01 como versão 1.3.5, atualizando apenas versão, data e documentação, sem modificar a implementação anteriormente auditada.
+- A-01 (revisão independente): substitui `local SECONDS=0`, que não avançava nos Bash reproduzidos, por prazo monotônico baseado em `/proc/uptime`. A conferência recebe apenas o saldo positivo, sem renovar o orçamento; mantém `-k 3s`, evidências íntegras e códigos públicos.
+- A-01: acrescenta regressões de orçamento com atrasos reais e medição independente. A análise de sintaxe/ShellCheck da CI passa a incluir `tests/fixtures/*.sh`, sem outras mudanças no workflow.
+- A-01: propaga separadamente a completude das coletas geral, kernel e sistema; atingir o limite de registros deixa de equivaler a sucesso completo para a heurística de ausência.
+- A-01: confere contagens pelos metadados `__CURSOR` quando a saída curta está abaixo do limite, cobrindo registros sem `MESSAGE` e conteúdo não exibido. Mantém filtros, limites de registros/bytes e orçamento compartilhado de tempo.
+- A-01: ausência em coleta incompleta não fundamenta aviso de reinício abrupto nem promoção de IPMI a causa provável. Preserva evidências positivas confiáveis disponíveis com aviso de incompletude.
+- A-01: distingue estados internos de falha e truncamento; preserva os códigos públicos `0/1/2/3`, inclusive `3` em falha ou descarte dos dados por bytes. Acrescenta testes sintéticos de regressão e integração sem logs reais, root ou hardware.
 
 ## 1.3.4 — 2026-10-29
+
+Publicação histórica em 2026-11-06. A data do título corresponde à identificação interna do script; os ajustes de CI abaixo já integram essa release.
 
 - Corrige a referência temporal do journal: usa `__REALTIME_TIMESTAMP` (recebimento) em vez do horário exibido por `short-unix`, que pode ser o de origem. A diferença podia excluir o último registro e produzir uma coleta vazia apesar de existir boot anterior.
 - Mantém ID de boot fixo, janela temporal, microssegundos e limites FAST/FULL, sem dependências novas ou consulta causal sem janela.
@@ -25,6 +33,9 @@ As datas seguem o histórico Git quando existe commit correspondente. Uma entrad
 - Expõe falhas/timeouts e ausência de amostras na coleta histórica; não usa saída parcial de consultas que falharam. Mantém o corte deliberado de amostras `.gz`, com aviso.
 - Executa cenários de integração em processos Bash independentes, preservando `errexit`/`ERR`; amplia regressões dos casos revisados.
 - Configura CI em Debian 12/13 e Ubuntu 24.04/26.04 com permissões mínimas e action fixada por commit; inclui o texto integral da GPLv3 e atualiza o README.
+- Corrige a compatibilidade da CI com ShellCheck 0.9/0.10: passa o diretório de logs explicitamente e documenta os mocks chamados indiretamente, sem desativar a análise do código de produção.
+- Restringe a exceção `safe.directory` ao checkout e a cada comando Git de validação; verifica que existe uma árvore de trabalho e confere também whitespace do commit. Não usa confiança global em todos os repositórios.
+- Registra as versões de Bash/ShellCheck na CI para facilitar a comparação com a validação local.
 
 ## 1.3.3 — 2026-09-23
 

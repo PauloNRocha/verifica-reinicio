@@ -43,9 +43,17 @@ assert_lacks() {
 }
 analyze() {
     EXIT_CODE=0
+    # Estas unidades fornecem entradas completas; A-01 exercita estados parciais.
+    JOURNAL_STATUS=0 KERNEL_STATUS=0 SYSTEM_STATUS=0
     # Nas unidades, o quinto argumento representa a coleta de origem confiavel.
     analisa_reinicio "$1" "$2" "$3" "$4" "${5-$1}" > "$work/result"
     result="$(cat "$work/result")"
+}
+mock_metadata() {
+    local count="$1"
+    shift
+    [[ " $* " == *' --output-fields=__CURSOR '* ]] || return 1
+    awk -v n="$count" 'BEGIN {for(i=0;i<n;i++) print "__CURSOR=s=ficticio;i=" i}'
 }
 end='2026-02-04T12:21:20.500000-03:00'
 REF_TS="$end"
@@ -189,7 +197,7 @@ BOOT_END_TS="$end"
 PREVIOUS_BOOT_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 # Mock chamado indiretamente por timeout.
 # shellcheck disable=SC2317,SC2329
-journalctl() { printf '%s\n' "$*" > "$work/args"; printf '%s\n' "$log"; }
+journalctl() { if mock_metadata 1 "$@"; then return 0; fi; printf '%s\n' "$*" > "$work/args"; printf '%s\n' "$log"; }
 # shellcheck disable=SC2317,SC2329
 timeout() { shift 3; "$@"; }
 coleta_journal_boot_anterior > "$work/journal"
@@ -278,6 +286,9 @@ assert_has "$(cat "$work/args")" '-o export --output-fields=__REALTIME_TIMESTAMP
 # A consulta antiga o excluía, embora o histórico mostrasse o boot anterior.
 # shellcheck disable=SC2317,SC2329
 journalctl() {
+    local count=1
+    [[ " $* " != *' -k '* ]] || count=0
+    if mock_metadata "$count" "$@"; then return 0; fi
     if [[ "$1" == '--list-boots' ]]; then
         printf '%s\n' '-1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa dates unused' "0 $mock_current_id dates unused"
     elif [[ " $* " == *' -o export '* ]]; then
@@ -316,7 +327,7 @@ for mode in FAST FULL; do
 done
 # Coleta geral vazia após referência válida é erro, não ausência normal de journal.
 # shellcheck disable=SC2317,SC2329
-journalctl() { :; }
+journalctl() { if mock_metadata 0 "$@"; then return 0; fi; :; }
 coleta_journal_boot_anterior > "$work/empty" 2> "$work/empty-error" && status=0 || status=$?
 assert_eq "$status" 3 'consulta geral inconsistente retorna erro'
 assert_has "$(cat "$work/empty-error")" 'consulta temporal do journal retornou vazia' 'aviso específico para coleta inconsistente'
@@ -591,7 +602,7 @@ PREVIOUS_BOOT_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 # shellcheck disable=SC2317,SC2329
 timeout() { shift 3; "$@"; }
 # shellcheck disable=SC2317,SC2329
-journalctl() { printf '%s\n' "$*" > "$work/args"; printf '%s\n' "$normal"; }
+journalctl() { if mock_metadata 1 "$@"; then return 0; fi; printf '%s\n' "$*" > "$work/args"; printf '%s\n' "$normal"; }
 coleta_journal_sistema_boot_anterior > "$work/system" 2> "$work/warnings"
 assert_has "$(cat "$work/args")" '_PID=1 _UID=0 + _SYSTEMD_UNIT=systemd-logind.service _COMM=systemd-logind _UID=0' 'filtro na fonte usa metadados confiaveis'
 assert_lacks "$(cat "$work/args")" 'SYSLOG_IDENTIFIER=' 'tag fornecida pelo aplicativo nao e autoridade'
@@ -599,22 +610,25 @@ assert_has "$(cat "$work/args")" '--until @1768479660.000000' 'coleta confiavel 
 JOURNAL_MAX_BYTES=16
 status=0
 coleta_journal_boot_anterior > "$work/too-big" 2> "$work/warnings" || status=$?
-assert_eq "$status" 3 'journal excedente e erro de coleta'
+# Retorno interno 5 distingue corte por bytes; main preserva exit publico 3 (A-01).
+assert_eq "$status" 5 'journal excedente e truncamento por bytes'
 assert_eq "$(cat "$work/too-big")" '' 'journal cortado nao alimenta diagnostico'
 assert_has "$(cat "$work/warnings")" 'bytes excedido' 'limite explica indisponibilidade'
 JOURNAL_MAX_BYTES=8388608
 FAST_LIMIT=2
 # shellcheck disable=SC2317,SC2329
-journalctl() { printf '%s\n' "$normal" '    continuation one' '    continuation two'; }
+journalctl() { if mock_metadata 1 "$@"; then return 0; fi; printf '%s\n' "$normal" '    continuation one' '    continuation two'; }
 coleta_journal_boot_anterior > /dev/null 2> "$work/warnings"
 assert_lacks "$(cat "$work/warnings")" 'registros atingido' 'continuacoes nao sao contadas como registros'
 # shellcheck disable=SC2317,SC2329
-journalctl() { printf '%s\n' "$normal" "$normal"; }
-coleta_journal_boot_anterior > /dev/null 2> "$work/warnings"
+journalctl() { if mock_metadata 2 "$@"; then return 0; fi; printf '%s\n' "$normal" "$normal"; }
+status=0
+coleta_journal_boot_anterior > /dev/null 2> "$work/warnings" || status=$?
+assert_eq "$status" 4 'limite exato nao confirma completude'
 assert_has "$(cat "$work/warnings")" '2 registros atingido' 'avisa limite real de registros'
 FAST_LIMIT=1500
 # shellcheck disable=SC2317,SC2329
-journalctl() { :; }
+journalctl() { if mock_metadata 0 "$@"; then return 0; fi; :; }
 status=0
 coleta_journal_sistema_boot_anterior > /dev/null 2> "$work/warnings" || status=$?
 assert_eq "$status" 0 'coleta confiavel vazia e normal'
@@ -678,4 +692,7 @@ mkdir "$work/empty-logs"
 coleta_logs_aux "$work/empty-logs" > /dev/null 2> "$work/warnings"
 assert_has "$(cat "$work/warnings")" 'Nenhuma amostra histórica pôde ser consultada' 'diretorio vazio nao implica consulta bem sucedida'
 
-printf 'OK: %s verificações com dados sintéticos.\n' "$checks"
+# Mantem A-01 na validacao padrao, sem alterar o workflow nesta etapa.
+bash "$root/tests/a01.sh"
+bash "$root/tests/orcamento.sh"
+printf 'OK: %s verificações históricas com dados sintéticos.\n' "$checks"

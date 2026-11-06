@@ -2,7 +2,9 @@
 
 Ferramenta Bash para investigar o último reinício ou desligamento de um servidor Linux. Reúne registros do journal, identifica evidências e, no modo FULL, consulta logs históricos e o SEL do IPMI.
 
-**Versão:** 1.3.4 — 29 de outubro de 2026
+**Versão:** 1.3.5 — 6 de novembro de 2026
+
+**Status:** em preparação, ainda não publicada.
 
 O foco é Debian 12/13, Ubuntu e hosts Proxmox VE com systemd. A ferramenta não comprova automaticamente a causa de todo reinício: ausência de logs, retenção, relógios divergentes e falhas de hardware podem impedir uma conclusão.
 
@@ -107,7 +109,8 @@ As consultas seguintes usam `--since` e `--until` nesse mesmo ID, preservando os
 | Journal geral, kernel ou sistema | Até 8 MiB por consulta; exceder descarta a amostra e retorna `3` |
 | Histórico de boots / referência final | Até 1 MiB / 64 KiB |
 | Referência inicial do boot (FULL) | Primeiros 4 KiB de metadados; sem interpretar o histórico formatado |
-| Cada comando journalctl | 30 segundos, mais até 3 segundos para encerramento forçado |
+| Journal geral/kernel/sistema (dados + conferência) | Orçamento compartilhado de 30 segundos por fonte, mais até 3 segundos para encerramento forçado |
+| Preparação/referências do journal | Até 30 segundos por comando, mais até 3 para encerramento forçado |
 | Logs históricos FULL | Até 24 arquivos; amostra de até 2 MiB por arquivo |
 | Arquivo histórico texto | Últimos 2 MiB |
 | Arquivo `.gz` | Primeiros 2 MiB descompactados; até 5 segundos, mais 2 para encerramento |
@@ -116,7 +119,21 @@ As consultas seguintes usam `--since` e `--until` nesse mesmo ID, preservando os
 
 Os limites estão definidos no início do script. Atingir um limite pode deixar evidências de fora; FULL significa mais contexto, não auditoria completa de todos os arquivos. A janela temporal não garante que um evento encontrado causou o reboot.
 
-O aviso de limite de registros conta o início das entradas, não as linhas de continuação de mensagens multilinha. O limite de bytes protege também contra poucas mensagens muito grandes. Dados cortados do journal não sustentam diagnóstico.
+### Completude da coleta (A-01)
+
+As coletas **geral, kernel e sistema** têm estados independentes: completa na janela, potencialmente incompleta, indisponível ou falha. “Completa” significa que a consulta limitada terminou e sua representação pôde ser conferida; não garante retenção de todo o boot ou que o sistema registrou todos os eventos.
+
+Ao retornar exatamente 1.500/8.000 registros, não é possível distinguir uma janela com esse tamanho de outra maior usando apenas `-n`. O script considera ambas potencialmente incompletas, sem aumentar o limite para buscar um registro adicional. Quando há menos linhas de entrada, uma consulta limitada de metadados `__CURSOR`, com o mesmo boot, janela e filtros, confere a contagem: o formato curto pode omitir entradas sem `MESSAGE`. Continuação de mensagem multilinha não conta como nova entrada. Diferenças de contagem, corte dos metadados e marcadores `blob data` também impedem confirmar completude.
+
+A consulta de dados e sua conferência compartilham o orçamento de **30 segundos**, com a mesma tolerância de encerramento forçado. Cada captura permanece limitada a **8 MiB**. Falha/timeout descarta a saída da consulta que falhou; corte por bytes dos dados também a descarta. Se apenas a conferência de metadados falhar, os dados íntegros já obtidos permanecem disponíveis como evidência positiva. Os estados distinguem falha de truncamento, preservando o código final `3` em falha ou corte por bytes dos dados, como antes.
+
+O orçamento usa um prazo baseado em `/proc/uptime`, lido com builtins compatíveis com Bash 4.4 ou posterior. Essa referência do kernel não depende de saltos no horário civil e inclui suspensão: o tempo suspenso também consome o orçamento. Antes da conferência, somente o saldo é repassado ao `timeout`, com reserva de um centésimo para a resolução da leitura. Saldo esgotado impede iniciar a segunda consulta; nunca se passa duração zero, pois isso desativaria o limite. Relógio indisponível/inválido retorna `3`, preservando os dados íntegros já coletados quando existentes. O limite não é uma garantia de tempo real: há custo de processamento/escalonamento e a tolerância de `-k 3s` continua separada.
+
+Uma coleta potencialmente incompleta por registros **não é erro de execução**, mas sua ausência de mensagens não sustenta conclusões. Sem evidência positiva suficiente, o resultado é inconclusivo (`2`), sem afirmar ausência de shutdown ou destacar reinício abrupto com base nessa ausência. Por precaução, a classificação automática de energia exige as três coletas completas; se qualquer uma estiver incompleta, o IPMI permanece como indício, mesmo com relógio e horários correlacionados.
+
+Evidências positivas explícitas e confiáveis nos registros disponíveis continuam utilizáveis: kernel panic, sequência ordenada e solicitação do logind mantêm suas classificações registradas (`0`, se não houver erro em outra coleta). Um aviso informa que outros eventos podem ter ficado de fora. Não se interpretam fragmentos cortados por bytes como evidência; uma evidência íntegra em outra coleta ainda pode ser mostrada, mas não apaga o código `3` de uma falha/descarte.
+
+Internamente, as funções de coleta usam `0` (completa), `2` (indisponível), `3` (falha), `4` (potencialmente incompleta) e `5` (dados cortados por bytes). Esses estados são propagados fora das substituições de comando; **não são novos códigos de saída da interface CLI**.
 
 O produtor de cada captura limitada recebe o comportamento padrão de `SIGPIPE`, mesmo se o processo que iniciou o script ignorava esse sinal. Isso permite distinguir corte planejado de erros reais de leitura, sem ignorar erros do `gzip` ou do journal.
 
@@ -132,6 +149,7 @@ Para usar o SEL na classificação:
 - O início do boot atual deve estar disponível e próximo da referência, em até 30 minutos. Intervalos maiores exigem investigação manual.
 - A descrição deve indicar perda elétrica explícita, como `Power Supply AC lost`, com estado `Asserted`, sem `Deasserted` posterior do mesmo sensor/condição até a referência.
 - Mensagens confiáveis de desligamento têm prioridade sobre uma hipótese elétrica. Falha na coleta do journal também impede promover o SEL a causa provável.
+- As três coletas do journal devem estar completas na janela; ausência de shutdown em amostra incompleta não favorece a hipótese elétrica.
 
 Os eventos são ordenados pelo horário interpretado e pareados por sensor e condição. `Deasserted` até a referência cancela a perda anterior correspondente; a recuperação de outra fonte não a cancela. Recuperação depois do último registro ainda pode ser compatível com uma interrupção, por isso não exclui automaticamente a hipótese. `Fully Redundant` não indica falha. O estado é o observado na amostra, não uma consulta da saúde atual. Falhas de uma fonte redundante não comprovam interrupção total do host.
 
@@ -170,14 +188,19 @@ Verifique `Storage=` e os arquivos de configuração adicionais do journald ante
 
 ```bash
 bash -n verifica-reinicio.sh
-for arquivo in tests/*.sh; do bash -n "$arquivo"; done
-shellcheck -x -P SCRIPTDIR verifica-reinicio.sh tests/*.sh
+for arquivo in tests/*.sh tests/fixtures/*.sh; do bash -n "$arquivo"; done
+shellcheck -x -P SCRIPTDIR verifica-reinicio.sh tests/*.sh tests/fixtures/*.sh
 bash tests/regressao.sh
+bash tests/a01.sh
 ```
 
 Os testes usam dados sintéticos e comandos simulados. Não consultam o BMC, carregam módulos ou precisam de root. Cobrem perda/recuperação por sensor, limites entre boots, mensagens citadas por aplicativos, limites de bytes, logs comprimidos inválidos, timestamps e códigos de saída. Preservam as regressões de recebimento/origem, último registro em FAST/FULL, sequência ordenada e tecla de energia.
 
 `tests/integracao.sh` é o executor dos cenários de integração, chamado pela suíte em processos Bash independentes. Assim, falhas inesperadas exercitam `set -e` e o trap `ERR`, sem desativá-los por envolver `main` em uma condição.
+
+`tests/a01.sh` exercita coleta, propagação de estados e análise pelo `main`, em processos sem root e com `journalctl` substituído por `tests/fixtures/journalctl-a01.sh`. Usa os limites reais FAST/FULL/8 MiB, simula falhas e testa um timeout real com orçamento reduzido somente no cenário. O IPMI é sintético e os acessos a logs do host são substituídos; não execute o script principal como root para rodar esses testes.
+
+`tests/orcamento.sh`, também chamado pela suíte padrão, acrescenta atrasos reais nas duas consultas e simula custo de captura após a primeira. Mede duração e saldo concedido com `date +%s%N`, independentemente de `/proc/uptime` e de `SECONDS`; não altera o relógio do sistema. Confere sucesso, consumo significativo/quase total, esgotamento, timeout/falha da conferência, preservação da evidência positiva e tolerância de encerramento forçado. Usa folgas explícitas para escalonamento em CI. Sintaxe e ShellCheck na CI incluem todos os testes e a fixture.
 
 O workflow `.github/workflows/validacao.yml` configura sintaxe, ShellCheck e regressões em containers Debian 12/13 e Ubuntu 24.04/26.04. Usa permissão somente de leitura do repositório e não persiste credenciais. A instalação de pacotes acontece apenas nos containers de CI, não no host diagnosticado. A matriz só representa validação executada após o workflow terminar com sucesso no GitHub.
 
